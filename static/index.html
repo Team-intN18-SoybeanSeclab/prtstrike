@@ -1,0 +1,1108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <script>
+        // Clean up any stale login flags to ensure fresh state
+        sessionStorage.removeItem('justLoggedIn');
+    </script>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PRTSTRIKE // LOGIN</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;700;900&family=JetBrains+Mono:wght@400;700&family=Syncopate:wght@400;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --accent: #7d8e8e;
+            --bg: #0a0a0a;
+            --surface: #121212;
+            --text-main: #e0e0e0; /* 统一文字颜色 */
+            --text-dim: rgba(255, 255, 255, 0.25);
+            --danger: #ff3b30;
+            --border: rgba(255, 255, 255, 0.08);
+            --glitch-red: rgba(255, 0, 80, 0.4);
+            --glitch-cyan: rgba(0, 255, 255, 0.4);
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            -webkit-font-smoothing: antialiased;
+        }
+
+        body {
+            background-color: var(--bg);
+            color: var(--text-main);
+            font-family: 'Inter', sans-serif;
+            height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            overflow: hidden;
+            position: relative;
+        }
+
+        .login-card.exit-active {
+            pointer-events: none;
+            background: none !important;
+            border-color: transparent !important;
+            box-shadow: none !important;
+            backdrop-filter: none !important;
+            transition: background 0.3s, border 0.3s;
+        }
+
+        .login-card.exit-active .card-left {
+            animation: splitLeftEndfield 0.9s cubic-bezier(0.8, 0, 0.2, 1) forwards;
+            z-index: 10;
+        }
+
+        .login-card.exit-active .card-right {
+            animation: splitRightEndfield 0.9s cubic-bezier(0.8, 0, 0.2, 1) forwards;
+            z-index: 5;
+        }
+
+        @keyframes splitLeftEndfield {
+            0% { 
+                transform: translateX(0) skew(0deg); 
+                clip-path: polygon(0 0, 100% 0, 100% 100%, 0 100%);
+                filter: brightness(1) blur(0) drop-shadow(0 0 0 transparent);
+            }
+            20% {
+                filter: brightness(2) drop-shadow(0 0 10px var(--accent));
+                transform: translateX(-5%) skew(-2deg);
+            }
+            100% { 
+                transform: translateX(-150%) skew(-15deg) scaleX(1.2); 
+                clip-path: polygon(0 0, 80% 0, 100% 100%, 0 100%);
+                opacity: 0;
+                filter: brightness(4) blur(20px) contrast(2);
+            }
+        }
+
+        @keyframes splitRightEndfield {
+            0% { 
+                transform: translateX(0) skew(0deg); 
+                clip-path: polygon(0 0, 100% 0, 100% 100%, 0 100%);
+                filter: brightness(1) blur(0);
+            }
+            20% {
+                filter: brightness(2);
+                transform: translateX(5%) skew(2deg);
+            }
+            100% { 
+                transform: translateX(150%) skew(15deg) scaleX(1.2); 
+                clip-path: polygon(20% 0, 100% 0, 100% 100%, 0 100%);
+                opacity: 0;
+                filter: brightness(4) blur(20px) contrast(2);
+            }
+        }
+
+        .gacha-animation-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: #000;
+            z-index: 9999;
+            display: none;
+            opacity: 0;
+            transition: opacity 0.3s ease;
+            overflow: hidden;
+            align-items: center;
+            justify-content: center;
+            pointer-events: none;
+        }
+
+        .gacha-animation-overlay.reveal-active {
+            display: flex;
+            opacity: 1;
+            pointer-events: auto;
+        }
+
+        .corner-bracket {
+            position: absolute;
+            width: 40px;
+            height: 40px;
+            border: 2px solid var(--accent);
+            opacity: 0.4;
+            z-index: 6;
+        }
+        .cb-tl { top: 40px; left: 40px; border-right: 0; border-bottom: 0; }
+        .cb-tr { top: 40px; right: 40px; border-left: 0; border-bottom: 0; }
+        .cb-bl { bottom: 40px; left: 40px; border-right: 0; border-top: 0; }
+        .cb-br { bottom: 40px; right: 40px; border-left: 0; border-top: 0; }
+
+        .reveal-active .corner-bracket {
+            animation: bracketPulse 2s infinite ease-in-out;
+        }
+
+        @keyframes bracketPulse {
+            0%, 100% { transform: scale(1); opacity: 0.4; }
+            50% { transform: scale(1.05); opacity: 0.6; }
+        }
+
+        .gacha-scan-line {
+            position: absolute;
+            width: 100%;
+            height: 2px;
+            background: linear-gradient(90deg, transparent, var(--accent), transparent);
+            top: 0;
+            z-index: 5;
+            opacity: 0;
+            box-shadow: 0 0 20px var(--accent);
+        }
+
+        .reveal-active .gacha-scan-line {
+            animation: gachaScan 1.2s cubic-bezier(0.4, 0, 0.2, 1) forwards,
+                       gachaScanGlow 1.2s ease-out forwards;
+        }
+
+        @keyframes gachaScan {
+            0% { top: 0; opacity: 1; }
+            100% { top: 100%; opacity: 0; }
+        }
+
+        @keyframes gachaScanGlow {
+            0% { filter: brightness(2); }
+            100% { filter: brightness(1); }
+        }
+
+        .operator-trio {
+            display: flex;
+            align-items: center; 
+            justify-content: center;
+            width: 100%;
+            height: 100%;
+            position: relative;
+            z-index: 2;
+        }
+
+        .trio-char {
+            height: 70vh; 
+            width: auto;
+            object-fit: contain;
+            filter: drop-shadow(0 0 40px rgba(139, 125, 20, 0.3)) brightness(0) contrast(1.5);
+            transform: scale(0.6) translateY(200px); 
+            opacity: 0;
+            transition: transform 1.8s cubic-bezier(0.19, 1, 0.22, 1), 
+                        opacity 1.2s ease-out, 
+                        filter 1.5s ease-out;
+            position: relative;
+            pointer-events: none;
+        }
+
+        .reveal-active .trio-char {
+            opacity: 1;
+            transform: scale(1) translateY(0) !important;
+            filter: drop-shadow(0 0 80px rgba(139, 125, 20, 0.5)) brightness(1) contrast(1);
+            animation: trioBreathe 8s ease-in-out infinite alternate 1.8s;
+        }
+
+        @keyframes trioBreathe {
+            from { transform: scale(1) translateY(0); }
+            to { transform: scale(1.03) translateY(-15px); }
+        }
+
+        .reveal-info {
+            position: absolute;
+            top: 80px;
+            left: 80px;
+            text-align: left;
+            z-index: 3;
+            opacity: 0;
+            border-left: 3px solid var(--accent);
+            padding-left: 30px;
+            background: linear-gradient(90deg, rgba(125, 142, 142, 0.1), transparent);
+        }
+
+        .reveal-active .reveal-info {
+            animation: infoEntrance 1s 0.8s forwards;
+        }
+
+        @keyframes infoEntrance {
+            from { opacity: 0; transform: translateX(-40px); filter: blur(10px); }
+            to { opacity: 1; transform: translateX(0); filter: blur(0); }
+        }
+
+        .reveal-name {
+            font-family: 'Syncopate', sans-serif;
+            font-size: 42px; 
+            font-weight: 900;
+            color: var(--accent);
+            letter-spacing: 12px;
+            margin-bottom: 8px;
+            text-transform: uppercase;
+            text-shadow: 0 0 20px rgba(125, 142, 142, 0.5);
+        }
+
+        .reveal-tag {
+            font-family: 'JetBrains Mono', monospace;
+            color: #fff;
+            font-size: 12px;
+            letter-spacing: 4px;
+            opacity: 0.6;
+        }
+
+        .gacha-bottom-bar {
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            width: 0;
+            height: 4px;
+            background: var(--accent);
+            z-index: 4;
+        }
+
+        .reveal-active .gacha-bottom-bar {
+            animation: barGrow 3.5s linear forwards;
+        }
+
+        @keyframes barGrow {
+            from { width: 0; }
+            to { width: 100%; }
+        }
+
+        .transition-curtain {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: #000;
+            z-index: 10000; /* 统一 z-index */
+            transform: translateY(100%);
+            opacity: 0;
+            visibility: hidden;
+            transition: opacity 0.4s ease, transform 0.6s cubic-bezier(0.16, 1, 0.3, 1);
+            pointer-events: none;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            overflow: hidden;
+            will-change: transform;
+        }
+
+        .transition-curtain.active {
+            transform: translateY(0);
+            opacity: 1;
+            visibility: visible;
+            pointer-events: auto;
+        }
+
+        /* 系统日志流样式 - 与 dashboard 完全同步 */
+        .curtain-logs-fixed {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            padding: 20px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 9px;
+            color: var(--accent);
+            opacity: 0.2;
+            overflow: hidden;
+            pointer-events: none;
+            display: block;
+            line-height: 1.2;
+            z-index: 1;
+            column-count: 4;
+            column-gap: 40px;
+        }
+
+        .log-line {
+            white-space: nowrap;
+            animation: logFade 0.5s ease-out forwards;
+        }
+
+        @keyframes logFade {
+            from { opacity: 0; transform: translateX(-10px); }
+            to { opacity: 1; transform: translateX(0); }
+        }
+
+        /* 战术外框样式 - 与 dashboard 完全同步 */
+        .curtain-brackets-fixed {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 600px;
+            height: 240px;
+            border: 1px solid rgba(139, 125, 20, 0.2);
+            pointer-events: none;
+            z-index: 1;
+        }
+
+        .curtain-brackets-fixed::before, .curtain-brackets-fixed::after {
+            content: "";
+            position: absolute;
+            width: 20px;
+            height: 20px;
+            border: 2px solid var(--accent);
+        }
+
+        .curtain-brackets-fixed::before { top: -2px; left: -2px; border-right: 0; border-bottom: 0; }
+        .curtain-brackets-fixed::after { bottom: -2px; right: -2px; border-left: 0; border-top: 0; }
+
+        /* 动态装饰角样式 - 与 dashboard 完全同步 */
+        .curtain-deco-fixed {
+            position: absolute;
+            width: 100%;
+            height: 100%;
+            top: 0;
+            left: 0;
+            pointer-events: none;
+            opacity: 0.3;
+        }
+
+        .curtain-deco-fixed::before, .curtain-deco-fixed::after {
+            content: "PRTS_INITIALIZING";
+            position: absolute;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 10px;
+            color: var(--accent);
+            letter-spacing: 2px;
+        }
+
+        .curtain-deco-fixed::before { top: 40px; left: 40px; transform: rotate(-90deg) translateX(-100%); transform-origin: top left; }
+        .curtain-deco-fixed::after { bottom: 40px; right: 40px; transform: rotate(90deg) translateX(100%); transform-origin: bottom right; }
+
+        .loading-container-fixed {
+            position: relative;
+            z-index: 2;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 30px;
+            background: rgba(0, 0, 0, 0.95);
+            border-left: 1px solid var(--accent);
+            border-right: 1px solid var(--accent);
+            width: 600px;
+            height: 160px;
+        }
+
+        .loading-container-fixed::before, .loading-container-fixed::after {
+            content: "";
+            position: absolute;
+            width: 30px;
+            height: 30px;
+            border: 2px solid var(--accent);
+        }
+        .loading-container-fixed::before { top: -2px; left: -2px; border-right: 0; border-bottom: 0; }
+        .loading-container-fixed::after { bottom: -2px; right: -2px; border-left: 0; border-top: 0; }
+
+        .loading-text-fixed {
+            font-family: 'Syncopate', sans-serif;
+            color: var(--accent);
+            font-size: 14px;
+            font-weight: 700;
+            letter-spacing: 10px;
+            text-shadow: 0 0 15px rgba(139, 125, 20, 0.5);
+            white-space: nowrap;
+            animation: curtainTextGlitch 0.2s infinite alternate;
+        }
+
+        .loading-progress-wrapper-fixed {
+            width: 320px;
+            height: 2px;
+            background: rgba(125, 142, 142, 0.1);
+            position: relative;
+            overflow: hidden;
+        }
+
+        .loading-progress-bar-fixed {
+            position: absolute;
+            top: 0;
+            left: 0;
+            height: 100%;
+            width: 0;
+            background: var(--accent);
+            box-shadow: 0 0 10px var(--accent);
+        }
+
+        .transition-curtain.active .loading-progress-bar-fixed {
+            animation: curtainProgress 1.5s cubic-bezier(0.1, 0, 0.3, 1) forwards 0.5s;
+        }
+
+        @keyframes curtainProgress {
+            from { width: 0; }
+            to { width: 100%; }
+        }
+
+        @keyframes curtainTextGlitch {
+            0% { transform: translate(0); text-shadow: -2px 0 var(--glitch-red), 2px 0 var(--glitch-cyan); }
+            20% { transform: translate(-2px, 1px); }
+            40% { transform: translate(-2px, -1px); }
+            60% { transform: translate(2px, 1px); }
+            80% { transform: translate(2px, -1px); }
+            100% { transform: translate(0); text-shadow: 2px 0 var(--glitch-red), -2px 0 var(--glitch-cyan); }
+        }
+
+        @keyframes curtainProgress {
+            0% { width: 0; }
+            30% { width: 40%; }
+            60% { width: 45%; }
+            100% { width: 100%; }
+        }
+
+        @keyframes curtainTextGlitch {
+            0% { transform: translate(0); text-shadow: -2px 0 var(--glitch-red), 2px 0 var(--glitch-cyan); }
+            20% { transform: translate(-2px, 1px); }
+            40% { transform: translate(-2px, -1px); }
+            60% { transform: translate(2px, 1px); }
+            80% { transform: translate(2px, -1px); }
+            100% { transform: translate(0); text-shadow: 2px 0 var(--glitch-red), -2px 0 var(--glitch-cyan); }
+        }
+
+        .curtain-logs-fixed {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            opacity: 0;
+            transition: opacity 0.5s 0.3s;
+            overflow: hidden;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 9px;
+            color: var(--accent);
+            padding: 20px;
+            line-height: 1.2;
+            column-count: 4;
+            column-gap: 40px;
+        }
+
+        .transition-curtain.active .curtain-logs-fixed {
+            opacity: 0.2; /* 统一透明度 */
+        }
+
+        .curtain-brackets-fixed {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 600px;
+            height: 240px;
+            border: 1px solid rgba(139, 125, 20, 0.2);
+            pointer-events: none;
+            opacity: 0;
+            transition: opacity 0.4s 0.2s;
+            z-index: 1;
+        }
+
+        .transition-curtain.active .curtain-brackets-fixed {
+            opacity: 1;
+        }
+
+        .curtain-brackets-fixed::before, .curtain-brackets-fixed::after {
+            content: "";
+            position: absolute;
+            width: 20px;
+            height: 20px;
+            border: 2px solid var(--accent);
+        }
+
+        .curtain-brackets-fixed::before { top: -2px; left: -2px; border-right: 0; border-bottom: 0; }
+        .curtain-brackets-fixed::after { bottom: -2px; right: -2px; border-left: 0; border-top: 0; }
+
+        .curtain-deco-fixed {
+            position: absolute;
+            width: 100%;
+            height: 100%;
+            top: 0;
+            left: 0;
+            pointer-events: none;
+            opacity: 0;
+            transition: opacity 0.5s 0.5s;
+        }
+
+        .transition-curtain.active .curtain-deco-fixed {
+            opacity: 0.3;
+        }
+
+        .curtain-deco-fixed::before, .curtain-deco-fixed::after {
+            content: "PRTS_INITIALIZING";
+            position: absolute;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 10px;
+            color: var(--accent);
+            letter-spacing: 2px;
+        }
+
+        .curtain-deco-fixed::before { top: 40px; left: 40px; transform: rotate(-90deg) translateX(-100%); transform-origin: top left; }
+        .curtain-deco-fixed::after { bottom: 40px; right: 40px; transform: rotate(90deg) translateX(100%); transform-origin: bottom right; }
+
+        .full-bg {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-image: url('static/img/zmd1.png');
+            background-size: cover;
+            background-position: center 25%;
+            background-repeat: no-repeat;
+            filter: brightness(0.26) contrast(1.2) grayscale(0.3); 
+            z-index: -2;
+        }
+
+        body::before {
+            content: "";
+            position: fixed;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background-image: 
+                linear-gradient(rgba(255,255,255,0.03) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(255,255,255,0.03) 1px, transparent 1px);
+            background-size: 40px 40px;
+            z-index: -1;
+        }
+
+        .bg-deco {
+            position: fixed;
+            top: 0; left: 0; width: 100%; height: 100%;
+            pointer-events: none;
+            z-index: -1;
+        }
+
+        .bg-deco::before {
+            content: "";
+            position: absolute;
+            top: 10%; left: 5%; width: 300px; height: 1px;
+            background: linear-gradient(90deg, var(--accent), transparent);
+            opacity: 0.3;
+        }
+
+        .bg-deco::after {
+            content: "SEC_LV:05 // PROTOCOL_V4 // COORD: 34.56N, 122.12E";
+            position: absolute;
+            bottom: 5%; right: 5%;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 10px;
+            color: var(--accent);
+            opacity: 0.2;
+            letter-spacing: 5px;
+        }
+
+        .side-numbers {
+            position: fixed;
+            top: 0;
+            right: 20px;
+            height: 100%;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            gap: 10px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 8px;
+            color: var(--accent);
+            opacity: 0.04; /* 调暗背景数字 */
+            z-index: -1;
+            user-select: none;
+        }
+
+        .scan-line-overlay {
+            position: fixed;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.25) 50%), 
+                        linear-gradient(90deg, rgba(255, 0, 0, 0.06), rgba(0, 255, 0, 0.02), rgba(0, 0, 255, 0.06));
+            background-size: 100% 2px, 3px 100%;
+            pointer-events: none;
+            z-index: 9998; /* 统一 z-index */
+            opacity: 1;
+        }
+
+        .login-card {
+            width: 1000px;
+            height: 500px;
+            background: none; 
+            border: none;
+            display: grid;
+            grid-template-columns: 1fr 400px;
+            position: relative;
+            box-shadow: none; 
+            backdrop-filter: blur(25px) saturate(180%);
+            -webkit-backdrop-filter: blur(25px) saturate(180%);
+            animation: cardEntrance 0.8s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+
+        @keyframes cardEntrance {
+            from { opacity: 0; transform: scale(1.05); }
+            to { opacity: 1; transform: scale(1); }
+        }
+
+        .card-left {
+            background: rgba(10, 10, 10, 0.001);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-right: none;
+            position: relative;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            justify-content: flex-end;
+            padding: 50px;
+            transition: all 0.5s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+
+        .character-display {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 1;
+            pointer-events: none;
+            display: flex;
+            align-items: flex-end;
+            justify-content: center;
+            overflow: hidden;
+            mask-image: linear-gradient(to top, rgba(0,0,0,0) 0%, rgba(0,0,0,1) 15%, rgba(0,0,0,1) 100%);
+            -webkit-mask-image: linear-gradient(to top, rgba(0,0,0,0) 0%, rgba(0,0,0,1) 15%, rgba(0,0,0,1) 100%);
+        }
+
+        .char-img-wrapper {
+            position: absolute;
+            bottom: 0;
+            left: 50%;
+            height: 200%; 
+            width: 100%;
+            display: flex;
+            justify-content: center;
+            align-items: flex-end;
+            transform: translate(-45%, 50%); 
+            pointer-events: none;
+        }
+
+        .char-img {
+            height: 100%;
+            width: auto;
+            object-fit: contain;
+            filter: brightness(0.85) contrast(1.15); 
+            mix-blend-mode: screen; 
+            opacity: 0.98;
+        }
+
+        .noise-overlay {
+             position: fixed;
+             top: 0; left: 0; width: 100%; height: 100%;
+             background: 
+                 repeating-radial-gradient(#000 0 0.0001%,#fff 0 0.0002%) 50% 0/2500px 2500px,
+                 repeating-conic-gradient(#000 0 0.0001%,#fff 0 0.0002%) 50% 50%/2500px 2500px;
+             background-blend-mode: difference;
+             opacity: 0.03;
+             pointer-events: none;
+             z-index: 10001; /* 统一 z-index */
+             filter: contrast(150) brightness(1.2);
+         }
+
+        .card-left * { position: relative; z-index: 2; }
+
+        .brand-logo {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            transform: translateY(15px);
+        }
+
+        .logo-box {
+            width: 40px;
+            height: 40px;
+            background: var(--accent);
+            clip-path: polygon(25% 0%, 100% 0%, 75% 100%, 0% 100%);
+        }
+
+        .logo-text {
+            font-family: 'Syncopate', sans-serif;
+            font-size: 18px;
+            font-weight: 700;
+            letter-spacing: 0.2em;
+        }
+
+        .brand-title h1 {
+            font-size: 72px;
+            font-weight: 900;
+            line-height: 0.85;
+            letter-spacing: -0.05em;
+            text-transform: uppercase;
+            position: relative;
+            animation: glitch 4s infinite;
+        }
+
+        @keyframes glitch {
+            0% { text-shadow: 2px 0 var(--danger), -2px 0 #00fff9; }
+            1% { text-shadow: -2px 0 var(--danger), 2px 0 #00fff9; }
+            2% { text-shadow: 2px 0 var(--danger), -2px 0 #00fff9; }
+            3% { text-shadow: none; }
+            100% { text-shadow: none; }
+        }
+
+        .card-footer-info {
+            font-size: 10px;
+            color: var(--text-dim);
+            font-family: 'JetBrains Mono', monospace;
+            display: flex;
+            gap: 40px;
+            margin-top: 20px;
+        }
+
+        .card-right {
+            background: rgba(15, 15, 15, 0.4);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            display: flex;
+            flex-direction: column;
+            padding: 50px;
+            position: relative;
+            transition: all 0.5s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+
+        .form-header {
+            margin-bottom: 50px;
+        }
+
+        .form-header h2 {
+            font-size: 10px;
+            color: var(--accent);
+            letter-spacing: 0.4em;
+            text-transform: uppercase;
+            margin-bottom: 10px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .form-header h2::after {
+            content: "";
+            flex: 1;
+            height: 1px;
+            background: var(--accent);
+            opacity: 0.3;
+        }
+
+        .input-group {
+            margin-bottom: 30px;
+        }
+
+        .input-group label {
+            display: block;
+            font-size: 9px;
+            color: var(--text-dim);
+            margin-bottom: 10px;
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+        }
+
+        input {
+            width: 100%;
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid var(--border);
+            color: #fff;
+            font-size: 14px;
+            padding: 15px;
+            font-family: 'JetBrains Mono', monospace;
+            outline: none;
+            transition: all 0.2s;
+        }
+
+        input:focus {
+            border-color: var(--accent);
+            background: rgba(255, 207, 0, 0.05);
+        }
+
+        button {
+            width: 100%;
+            padding: 20px;
+            background: var(--accent);
+            border: none;
+            color: #000;
+            font-weight: 900;
+            font-size: 14px;
+            letter-spacing: 0.3em;
+            text-transform: uppercase;
+            cursor: pointer;
+            margin-top: 20px;
+            position: relative;
+            clip-path: polygon(0 0, 100% 0, 100% 70%, 92% 100%, 0 100%);
+            transition: all 0.2s;
+        }
+
+        button:hover {
+            background: #fff;
+            transform: translateY(-2px);
+        }
+
+        button::after {
+            content: ">>";
+            position: absolute;
+            right: 20px;
+            opacity: 0.5;
+        }
+
+        .error-overlay {
+            position: absolute;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(255, 59, 48, 0.1);
+            border: 2px solid var(--danger);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 100;
+            pointer-events: none;
+            animation: errorFlash 0.2s infinite;
+        }
+
+        @keyframes errorFlash {
+            0% { opacity: 1; }
+            50% { opacity: 0.7; }
+            100% { opacity: 1; }
+        }
+
+        .error-text {
+            background: var(--danger);
+            color: #fff;
+            padding: 10px 30px;
+            font-weight: 900;
+            font-size: 12px;
+            letter-spacing: 0.3em;
+            clip-path: polygon(5% 0, 100% 0, 95% 100%, 0 100%);
+        }
+
+        /* Glitch Effect CSS from dashboard.html */
+        .glitch-wrapper {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: 100%;
+            width: 100%;
+        }
+        
+        .glitch-text {
+            font-family: 'Syncopate', sans-serif;
+            font-size: 48px;
+            font-weight: 900;
+            color: var(--accent);
+            letter-spacing: 10px;
+            position: relative;
+            animation: glitch-anim 0.3s infinite;
+        }
+
+        .glitch-text::before,
+        .glitch-text::after {
+            content: attr(data-text);
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: #000;
+        }
+
+        .glitch-text::before {
+            left: 2px;
+            text-shadow: -1px 0 var(--glitch-red);
+            clip: rect(24px, 550px, 90px, 0);
+            animation: glitch-anim-2 2s infinite linear alternate-reverse;
+        }
+
+        .glitch-text::after {
+            left: -2px;
+            text-shadow: -1px 0 var(--glitch-cyan);
+            clip: rect(85px, 550px, 140px, 0);
+            animation: glitch-anim-2 2s infinite linear alternate-reverse;
+        }
+
+        @keyframes glitch-anim {
+            0% { text-shadow: -2px 3px 0 var(--glitch-red), 2px -3px 0 var(--glitch-cyan); transform: translate(var(--glitch-translate)); }
+            20% { text-shadow: 2px -3px 0 var(--glitch-red), -2px 3px 0 var(--glitch-cyan); }
+            40%, 100% {  text-shadow: none; transform: none; }
+        }
+
+        @keyframes glitch-anim-2 {
+            0% { clip: rect(10px, 9999px, 30px, 0); }
+            20% { clip: rect(80px, 9999px, 100px, 0); }
+            40% { clip: rect(40px, 9999px, 60px, 0); }
+            60% { clip: rect(20px, 9999px, 10px, 0); }
+            80% { clip: rect(60px, 9999px, 50px, 0); }
+            100% { clip: rect(90px, 9999px, 100px, 0); }
+        }
+    </style>
+</head>
+<body>
+    <div class="gacha-animation-overlay" id="gacha-overlay">
+        <div class="corner-bracket cb-tl"></div>
+        <div class="corner-bracket cb-tr"></div>
+        <div class="corner-bracket cb-bl"></div>
+        <div class="corner-bracket cb-br"></div>
+        <div class="gacha-scan-line"></div>
+        <div class="operator-trio">
+            <img src="static/img/gcd.png" class="trio-char" crossorigin="anonymous">
+        </div>
+        <div class="reveal-info">
+            <div class="reveal-name">SQUAD_LEADERS</div>
+            <div class="reveal-tag">TACTICAL_ARCHIVE_UNLOCKED // AUTH_0xFF42</div>
+        </div>
+        <div class="gacha-bottom-bar"></div>
+    </div>
+
+    <div class="transition-curtain" id="transition-curtain">
+        <div class="glitch-wrapper">
+            <div class="glitch-text" data-text="ACCESS_GRANTED">ACCESS_GRANTED</div>
+        </div>
+    </div>
+
+    <div class="full-bg"></div>
+    <div class="noise-overlay"></div>
+    <div class="scan-line-overlay"></div>
+    <div class="bg-deco"></div>
+    <div class="side-numbers">
+        <div>0XFF42</div><div>0X8811</div><div>0X011C</div><div>0X04A2</div>
+        <div>0XFF42</div><div>0X8811</div><div>0X011C</div><div>0X04A2</div>
+        <div>0XFF42</div><div>0X8811</div><div>0X011C</div><div>0X04A2</div>
+    </div>
+
+    <div class="login-card">
+        <div class="card-left">
+            <div class="character-display" id="char-container">
+                <div class="char-img-wrapper" id="char-kalts">
+                    <img src="static/img/zmd.png" class="char-img" crossorigin="anonymous">
+                </div>
+            </div>
+            <div class="brand-logo">
+                <div class="logo-box"></div>
+                <div class="logo-text">PRTSTRIKE</div>
+            </div>
+            <div class="card-footer-info">
+                <div>SYS_VER: 1.0.0</div>
+                <div>NODE: ALPHA_01</div>
+                <div>SEC_LV: 05</div>
+            </div>
+        </div>
+
+        <div class="card-right">
+            <div class="form-header">
+                <h2>Login Protocol</h2>
+            </div>
+            <form id="loginForm">
+                <div class="input-group">
+                    <label>Operator Identification</label>
+                    <input type="text" name="username" placeholder="USER_ID" required spellcheck="false" autocomplete="off">
+                </div>
+                <div class="input-group">
+                    <label>Security Credentials</label>
+                    <input type="password" name="password" placeholder="PASSWORD" required autocomplete="off">
+                </div>
+                <button type="submit">Authenticate</button>
+            </form>
+            <div class="error-overlay" id="error-overlay-js" style="display: none;" onclick="this.style.display='none'">
+                <div class="error-text">ACCESS_DENIED // REJECTED</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        window.addEventListener('DOMContentLoaded', () => {
+            // 初始化日志
+            function createTransitionLogs() {
+                const container = document.getElementById('curtainLogs');
+                if (!container) return;
+                const logTypes = ['[INFO]', '[SYSTEM]', '[AUTH]', '[SEC]', '[DEBUG]'];
+                const logActions = [
+                    'CONNECTING_TO_PRTS_SERVER...',
+                    'VALIDATING_CLEARANCE_LEVEL_05',
+                    'INITIALIZING_NEURAL_INTERFACE',
+                    'DECRYPTING_TACTICAL_DATA_STREAM',
+                    'BYPASSING_EXTERNAL_FIREWALL',
+                    'LOADING_OPERATOR_DATABASE',
+                    'SYNCING_REAL_TIME_METRICS',
+                    'ESTABLISHING_SECURE_TUNNEL',
+                    'ALLOCATING_VIRTUAL_MEMORY',
+                    'BOOTING_PRTS_SUBSYSTEM'
+                ];
+
+                for(let i=0; i<120; i++) {
+                    const line = document.createElement('div');
+                    line.className = 'log-line';
+                    const timestamp = new Date().getTime().toString(16).toUpperCase();
+                    const type = logTypes[Math.floor(Math.random() * logTypes.length)];
+                    const action = logActions[Math.floor(Math.random() * logActions.length)];
+                    line.innerText = `${timestamp} ${type} ${action}`;
+                    container.appendChild(line);
+                }
+            }
+            createTransitionLogs();
+
+            const loginForm = document.getElementById('loginForm');
+            const gachaOverlay = document.getElementById('gacha-overlay');
+            const curtain = document.getElementById('transition-curtain');
+
+            if (loginForm) {
+                loginForm.addEventListener('submit', async (e) => {
+                    e.preventDefault();
+                    
+                    const formData = new FormData(loginForm);
+                    const submitBtn = loginForm.querySelector('button');
+                    const originalBtnText = submitBtn.innerText;
+                    
+                    submitBtn.disabled = true;
+                    submitBtn.innerText = 'AUTHENTICATING...';
+
+                    try {
+                        const response = await fetch('/api/login', {
+                            method: 'POST',
+                            body: formData
+                        });
+
+                        const result = await response.json();
+
+                        if (result.status === 'success') {
+                            sessionStorage.setItem('justLoggedIn', 'true');
+                            playGachaAnimation();
+                        } else {
+                            const errorOverlay = document.getElementById('error-overlay-js');
+                            if (errorOverlay) {
+                                errorOverlay.style.display = 'flex';
+                            }
+                            submitBtn.disabled = false;
+                            submitBtn.innerText = originalBtnText;
+                        }
+                    } catch (error) {
+                        console.error('Auth Error:', error);
+                        const errorOverlay = document.getElementById('error-overlay-js');
+                        if (errorOverlay) errorOverlay.style.display = 'flex';
+                        submitBtn.disabled = false;
+                        submitBtn.innerText = originalBtnText;
+                    }
+                });
+            }
+
+            function playGachaAnimation() {
+                const loginCard = document.querySelector('.login-card');
+                if (loginCard) loginCard.classList.add('exit-active');
+                setTimeout(() => {
+                    if (gachaOverlay) {
+                        gachaOverlay.style.display = 'flex';
+                        gachaOverlay.offsetHeight;
+                        gachaOverlay.style.opacity = '1';
+                        gachaOverlay.classList.add('reveal-active');
+                    }
+                }, 400);
+
+                setTimeout(() => {
+                    if (curtain) {
+                        curtain.classList.add('active');
+                        // 确保日志也开始生成
+                        const curtainLogs = document.getElementById('curtainLogs');
+                        if (curtainLogs && curtainLogs.children.length === 0) {
+                            createTransitionLogs();
+                        }
+                    }
+                    setTimeout(() => {
+                        window.location.href = '/dashboard';
+                    }, 800); // Allow curtain to fully fade in for seamless transition
+                }, 3800);
+            }
+        });
+    </script>
+</body>
+</html>

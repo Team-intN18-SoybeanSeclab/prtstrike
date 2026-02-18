@@ -1,0 +1,164 @@
+<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; flex-wrap: wrap; gap: 10px;">
+    <div class="section-header" style="margin-bottom: 0;">
+        <h3>Network Listeners</h3>
+    </div>
+    <button class="btn-primary" onclick="document.getElementById('create-listener-modal').style.display='flex'">
+        <i class="fas fa-plus"></i> NEW_LISTENER
+    </button>
+</div>
+
+<div class="list-container" style="overflow-x:auto;">
+    <div class="beacons-header-bar" style="grid-template-columns: 0.6fr 1.2fr 0.8fr 0.6fr 0.8fr 0.7fr 120px; min-width:650px;">
+        <span>ID</span>
+        <span>Name</span>
+        <span>Type</span>
+        <span>Port</span>
+        <span>Bind IP</span>
+        <span>Status</span>
+        <span style="text-align:right;">Actions</span>
+    </div>
+    <div id="listeners-list" style="max-height:400px; overflow-y:auto;">
+        <div style="padding:40px; text-align:center; opacity:0.3; font-family:'JetBrains Mono';">LOADING_LISTENERS...</div>
+    </div>
+</div>
+
+<!-- Create Listener Modal -->
+<div id="create-listener-modal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.85); backdrop-filter:blur(15px); z-index:2001; align-items:center; justify-content:center;">
+    <div style="width:95%; max-width:450px; background:#0a0a0a; border:1px solid var(--accent); padding:30px;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:25px;">
+            <h3 style="font-family:'JetBrains Mono'; letter-spacing:2px; color:var(--accent);">>> NEW_LISTENER</h3>
+            <span style="cursor:pointer; font-size:20px; color:var(--accent);" onclick="document.getElementById('create-listener-modal').style.display='none'">&times;</span>
+        </div>
+        <form onsubmit="event.preventDefault(); createListener();">
+            <div class="form-group" style="margin-bottom:15px;">
+                <label style="font-family:'JetBrains Mono'; font-size:11px; color:#888; margin-bottom:5px; display:block;">NAME:</label>
+                <input type="text" id="listener-name" class="form-input" placeholder="HTTP_LISTENER_01" required style="width:100%;">
+            </div>
+            <div class="form-group" style="margin-bottom:15px;">
+                <label style="font-family:'JetBrains Mono'; font-size:11px; color:#888; margin-bottom:5px; display:block;">TYPE:</label>
+                <select id="listener-type" class="form-input" style="width:100%;">
+                    <option value="reverse_http">Reverse HTTP</option>
+                    <option value="reverse_https">Reverse HTTPS</option>
+                    <option value="reverse_tcp">Reverse TCP</option>
+                </select>
+            </div>
+            <div class="form-group" style="margin-bottom:15px;">
+                <label style="font-family:'JetBrains Mono'; font-size:11px; color:#888; margin-bottom:5px; display:block;">BIND_IP:</label>
+                <input type="text" id="listener-bind" class="form-input" value="0.0.0.0" required style="width:100%;">
+            </div>
+            <div class="form-group" style="margin-bottom:20px;">
+                <label style="font-family:'JetBrains Mono'; font-size:11px; color:#888; margin-bottom:5px; display:block;">PORT:</label>
+                <input type="number" id="listener-port" class="form-input" value="8443" required style="width:100%;">
+            </div>
+            <button type="submit" class="btn-primary" style="width:100%;">CREATE_AND_START</button>
+        </form>
+    </div>
+</div>
+
+<script>
+(function() {
+    const typeColors = {
+        'reverse_http': 'var(--accent)',
+        'reverse_https': '#4caf50',
+        'reverse_tcp': '#e91e63'
+    };
+
+    async function fetchListeners() {
+        try {
+            const resp = await fetch('/api/listeners', { headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+            const result = await resp.json();
+            if (result.status === 'success') renderListeners(result.data || []);
+        } catch(e) { console.error('Fetch listeners error:', e); }
+    }
+
+    function renderListeners(listeners) {
+        const container = document.getElementById('listeners-list');
+        if (!container) return;
+
+        if (listeners.length === 0) {
+            container.innerHTML = '<div style="padding:40px; text-align:center; opacity:0.3; font-family:\'JetBrains Mono\';">NO_LISTENERS_CONFIGURED</div>';
+            return;
+        }
+
+        container.innerHTML = listeners.map(l => {
+            const isRunning = l.status === 'running';
+            const typeColor = typeColors[l.type] || 'var(--accent)';
+            const shortId = l.id.length > 8 ? l.id.substring(0, 8) : l.id;
+            return `
+            <div class="beacon-row" style="grid-template-columns: 0.6fr 1.2fr 0.8fr 0.6fr 0.8fr 0.7fr 120px; padding:10px 20px; ${isRunning ? '' : 'opacity:0.55;'}">
+                <span style="font-family:'JetBrains Mono'; font-size:11px; color:var(--accent);" title="${l.id}">${shortId}</span>
+                <span style="font-family:'JetBrains Mono'; font-size:12px;">
+                    <span class="status-dot ${isRunning ? 'online' : ''}" style="margin-right:8px; ${isRunning ? '' : 'background:#444; box-shadow:none;'}"></span>${l.name}
+                </span>
+                <span style="font-family:'JetBrains Mono'; font-size:11px; color:${typeColor}; text-transform:uppercase;">${l.type.replace('reverse_', '')}</span>
+                <span style="font-family:'JetBrains Mono'; font-size:12px; color:var(--accent);">${l.port}</span>
+                <span style="font-family:'JetBrains Mono'; font-size:11px; color:#888;">${l.bind_ip}</span>
+                <span style="font-size:11px; color:${isRunning ? 'var(--success)' : '#f44336'}; font-family:'JetBrains Mono'; text-transform:uppercase;">${l.status}</span>
+                <span style="text-align:right; display:flex; gap:8px; justify-content:flex-end;">
+                    ${isRunning
+                        ? `<span style="color:#f44336; cursor:pointer; font-size:11px; font-family:'JetBrains Mono';" onclick="stopListener('${l.id}')" title="Stop"><i class="fas fa-stop" style="margin-right:3px;"></i>STOP</span>`
+                        : `<span style="color:var(--success); cursor:pointer; font-size:11px; font-family:'JetBrains Mono';" onclick="startListener('${l.id}')" title="Start"><i class="fas fa-play" style="margin-right:3px;"></i>START</span>`
+                    }
+                    <span style="color:#ff3b30; cursor:pointer; font-size:11px;" onclick="deleteListener('${l.id}')" title="Delete">
+                        <i class="fas fa-trash"></i>
+                    </span>
+                </span>
+            </div>`;
+        }).join('');
+    }
+
+    window.createListener = async function() {
+        const body = {
+            name: document.getElementById('listener-name').value,
+            type: document.getElementById('listener-type').value,
+            bind_ip: document.getElementById('listener-bind').value,
+            port: parseInt(document.getElementById('listener-port').value)
+        };
+        try {
+            const resp = await fetch('/api/listeners', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+                body: JSON.stringify(body)
+            });
+            const result = await resp.json();
+            if (result.status === 'success') {
+                document.getElementById('create-listener-modal').style.display = 'none';
+                showNotification('LISTENER_CREATED: ' + body.name);
+                fetchListeners();
+            } else {
+                showNotification('ERROR: ' + result.message);
+            }
+        } catch(e) { showNotification('ERROR: ' + e.message); }
+    };
+
+    window.startListener = async function(id) {
+        try {
+            const resp = await fetch('/api/listeners/' + id + '/start', { method: 'POST', headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+            const result = await resp.json();
+            showNotification(result.message);
+            fetchListeners();
+        } catch(e) { showNotification('ERROR: ' + e.message); }
+    };
+
+    window.stopListener = async function(id) {
+        try {
+            const resp = await fetch('/api/listeners/' + id + '/stop', { method: 'POST', headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+            const result = await resp.json();
+            showNotification(result.message);
+            fetchListeners();
+        } catch(e) { showNotification('ERROR: ' + e.message); }
+    };
+
+    window.deleteListener = async function(id) {
+        if (!confirm('DELETE this listener?')) return;
+        try {
+            const resp = await fetch('/api/listeners/' + id, { method: 'DELETE', headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+            const result = await resp.json();
+            showNotification(result.message);
+            fetchListeners();
+        } catch(e) { showNotification('ERROR: ' + e.message); }
+    };
+
+    fetchListeners();
+})();
+</script>

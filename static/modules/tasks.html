@@ -1,0 +1,134 @@
+<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; flex-wrap: wrap; gap: 10px;">
+    <div class="section-header" style="margin-bottom: 0;">
+        <h3>Task Queue Management</h3>
+    </div>
+    <div style="display:flex; gap:10px; align-items:center; flex-wrap: wrap;">
+        <select id="task-filter-client" class="form-input" style="width:200px; height:32px; font-size:11px;" onchange="filterTasks()">
+            <option value="">ALL_CLIENTS</option>
+        </select>
+        <select id="task-filter-status" class="form-input" style="width:130px; height:32px; font-size:11px;" onchange="filterTasks()">
+            <option value="">ALL_STATUS</option>
+            <option value="pending">PENDING</option>
+            <option value="running">RUNNING</option>
+            <option value="completed">COMPLETED</option>
+            <option value="failed">FAILED</option>
+        </select>
+        <button class="btn-primary" style="height:32px; font-size:11px;" onclick="loadTasks()">
+            <i class="fas fa-sync"></i> REFRESH
+        </button>
+    </div>
+</div>
+
+<div class="list-container" style="max-height:600px; overflow-y:auto; overflow-x:auto;">
+    <div class="beacons-header-bar" style="grid-template-columns: 120px 120px 2fr 100px 2fr 150px; min-width:700px;">
+        <span>TASK_ID</span>
+        <span>CLIENT_ID</span>
+        <span>COMMAND</span>
+        <span>STATUS</span>
+        <span>RESULT</span>
+        <span>CREATED_AT</span>
+    </div>
+    <div id="tasks-list-body">
+        <div style="padding:40px; text-align:center; opacity:0.3; font-family:'JetBrains Mono';">LOADING_TASKS...</div>
+    </div>
+</div>
+
+<script>
+(function() {
+    let allTasks = [];
+
+    async function loadClients() {
+        try {
+            const resp = await fetch('/api/clients', { headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+            const result = await resp.json();
+            const sel = document.getElementById('task-filter-client');
+            if (sel && result.data) {
+                const opts = result.data.map(c => `<option value="${c.id}">${c.id} (${c.ip})</option>`).join('');
+                sel.innerHTML = '<option value="">ALL_CLIENTS</option>' + opts;
+            }
+        } catch(e) {}
+    }
+
+    window.loadTasks = async function() {
+        try {
+            const clientId = document.getElementById('task-filter-client')?.value || '';
+            const statusFilter = document.getElementById('task-filter-status')?.value || '';
+            let url = '/api/tasks?';
+            if (clientId) url += 'client_id=' + clientId + '&';
+            if (statusFilter) url += 'status=' + statusFilter + '&';
+            const resp = await fetch(url, { headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+            const result = await resp.json();
+            allTasks = result.data || [];
+            renderTasks(allTasks);
+        } catch(e) { console.error(e); }
+    };
+
+    window.filterTasks = function() {
+        window.loadTasks();
+    };
+
+    function renderTasks(tasks) {
+        const container = document.getElementById('tasks-list-body');
+        if (!container) return;
+
+        if (tasks.length === 0) {
+            container.innerHTML = '<div style="padding:40px; text-align:center; opacity:0.3; font-family:\'JetBrains Mono\';">NO_TASKS_FOUND</div>';
+            return;
+        }
+
+        const statusColors = {
+            'pending': '#ff9800',
+            'running': '#2196f3',
+            'completed': '#4caf50',
+            'failed': '#f44336'
+        };
+
+        container.innerHTML = tasks.map(t => {
+            const color = statusColors[t.status] || '#888';
+            const resultPreview = t.result ? (t.result.startsWith('SCREENSHOT:') ? '[SCREENSHOT - Click to view]' : t.result.substring(0, 80).replace(/</g,'&lt;') + (t.result.length > 80 ? '...' : '')) : '-';
+            const created = new Date(t.created_at).toLocaleString();
+            return `
+            <div class="beacon-row" style="grid-template-columns: 120px 120px 2fr 100px 2fr 150px; padding:8px 20px; font-size:11px;">
+                <span style="font-family:'JetBrains Mono'; color:var(--accent);">${t.id}</span>
+                <span style="font-family:'JetBrains Mono'; color:#888;">${t.client_id}</span>
+                <span style="font-family:'JetBrains Mono'; word-break:break-all;">${t.command}</span>
+                <span style="color:${color}; font-weight:bold; text-transform:uppercase;">${t.status}</span>
+                <span style="font-family:'JetBrains Mono'; color:#aaa; cursor:pointer;" onclick="expandTaskResult('${t.id}')" title="Click to expand">${resultPreview}</span>
+                <span style="color:#666;">${created}</span>
+            </div>`;
+        }).join('');
+    }
+
+    window.expandTaskResult = function(taskId) {
+        const task = allTasks.find(t => t.id === taskId);
+        if (!task || !task.result) return;
+
+        let contentHtml;
+        if (task.result.startsWith('SCREENSHOT:')) {
+            const b64 = task.result.substring(11);
+            const isBmp = b64.startsWith('Qk');
+            const mime = isBmp ? 'image/bmp' : 'image/png';
+            contentHtml = `<div style="padding:15px 20px;overflow:auto;max-height:70vh;text-align:center;">
+                <img src="data:${mime};base64,${b64}" style="max-width:100%;max-height:65vh;border:1px solid var(--border);cursor:pointer;" onclick="window.open(this.src,'_blank')" title="Click to open full size">
+            </div>`;
+        } else {
+            contentHtml = `<pre style="padding:15px 20px;font-family:'JetBrains Mono';font-size:11px;color:#ccc;overflow:auto;max-height:70vh;white-space:pre-wrap;word-break:break-all;">${task.result.replace(/</g,'&lt;')}</pre>`;
+        }
+
+        const html = `
+        <div style="position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.85);backdrop-filter:blur(10px);z-index:2001;display:flex;align-items:center;justify-content:center;" onclick="if(event.target===this)this.remove()">
+            <div style="width:700px;max-height:80vh;background:#0a0a0a;border:1px solid var(--accent);">
+                <div style="padding:10px 20px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;">
+                    <span style="font-family:'JetBrains Mono';font-size:11px;color:var(--accent);">${task.id} // ${task.command}</span>
+                    <span style="cursor:pointer;color:var(--accent);font-size:18px;" onclick="this.closest('[style*=fixed]').remove()">&times;</span>
+                </div>
+                ${contentHtml}
+            </div>
+        </div>`;
+        document.body.insertAdjacentHTML('beforeend', html);
+    };
+
+    loadClients();
+    window.loadTasks();
+})();
+</script>

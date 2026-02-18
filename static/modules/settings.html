@@ -1,0 +1,186 @@
+<div class="section-header">
+    <h3>System Settings</h3>
+</div>
+
+<div class="builder-section">
+    <div>
+        <div class="form-group">
+            <label>C2 Server Name</label>
+            <input type="text" class="form-input" id="setting-server-name" value="PRTSTRIKE_CORE">
+        </div>
+        <div class="form-group">
+            <label>API Port</label>
+            <input type="number" class="form-input" id="setting-api-port" value="8083" disabled>
+        </div>
+        <div class="form-group">
+            <label>Session Timeout (Hours)</label>
+            <input type="number" class="form-input" id="setting-timeout" value="24">
+        </div>
+    </div>
+    <div>
+        <div class="form-group">
+            <label>Theme Mode</label>
+            <select class="form-input" id="setting-theme">
+                <option value="PRTSTRIKE_DARK">PRTSTRIKE_DARK (Default)</option>
+                <option value="COLUMBIA_LIGHT">COLUMBIA_LIGHT</option>
+                <option value="LATERANO_GOLD">LATERANO_GOLD</option>
+            </select>
+        </div>
+        <div class="form-group">
+            <label>Debug Logging</label>
+            <select class="form-input" id="setting-debug">
+                <option value="false">Disabled</option>
+                <option value="true">Enabled (Verbose)</option>
+            </select>
+        </div>
+    </div>
+</div>
+
+<div style="margin-top: 20px; display: flex; justify-content: flex-end;">
+    <button class="btn-primary" onclick="saveSettings()">
+        <i class="fas fa-save"></i> SAVE_CONFIGURATION
+    </button>
+</div>
+
+<!-- Password Change Section -->
+<div style="margin-top: 40px;">
+    <div class="section-header">
+        <h3>Change Password</h3>
+    </div>
+    <div style="max-width:400px;">
+        <div class="form-group" style="margin-bottom:12px;">
+            <label>Current Password</label>
+            <input type="password" class="form-input" id="old-password" placeholder="Enter current password">
+        </div>
+        <div class="form-group" style="margin-bottom:12px;">
+            <label>New Password</label>
+            <input type="password" class="form-input" id="new-password" placeholder="Enter new password">
+        </div>
+        <div class="form-group" style="margin-bottom:12px;">
+            <label>Confirm New Password</label>
+            <input type="password" class="form-input" id="confirm-password" placeholder="Confirm new password">
+        </div>
+        <button class="btn-primary" onclick="changePassword()">
+            <i class="fas fa-key"></i> CHANGE_PASSWORD
+        </button>
+    </div>
+</div>
+
+<!-- Database Info -->
+<div style="margin-top: 40px;">
+    <div class="section-header">
+        <h3>Database Status</h3>
+    </div>
+    <div class="process-table-container">
+        <div class="process-row header">
+            <span>Model</span>
+            <span>Count</span>
+        </div>
+        <div id="db-stats-rows">
+            <div class="process-row">
+                <span class="process-name">Loading...</span>
+                <span class="process-id">-</span>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+(function() {
+    async function loadDBStats() {
+        try {
+            const resp = await fetch('/api/stats', { headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+            const result = await resp.json();
+            if (result.status === 'success') {
+                const d = result.data;
+                const el = document.getElementById('db-stats-rows');
+                if (el) {
+                    el.innerHTML = [
+                        { name: 'BEACONS', count: d.beacons_total, sub: `${d.beacons_online} online` },
+                        { name: 'LISTENERS', count: d.listeners_total, sub: `${d.listeners_running} running` },
+                        { name: 'TASKS', count: d.tasks_total, sub: `${d.tasks_pending} pending` },
+                    ].map(r => `
+                        <div class="process-row">
+                            <span class="process-name">${r.name}</span>
+                            <span class="process-id" style="color:var(--accent);">${r.count} ${r.sub ? '<span style="color:#666;font-size:10px;">(' + r.sub + ')</span>' : ''}</span>
+                        </div>
+                    `).join('');
+                }
+            }
+        } catch(e) {}
+    }
+    loadDBStats();
+
+    async function loadSettings() {
+        try {
+            const resp = await fetch('/api/settings', { headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+            const result = await resp.json();
+            if (result.status === 'success' && result.data) {
+                const s = result.data;
+                document.getElementById('setting-server-name').value = s.server_name || 'PRTSTRIKE_CORE';
+                document.getElementById('setting-timeout').value = s.session_timeout || 24;
+                document.getElementById('setting-theme').value = s.theme || 'PRTSTRIKE_DARK';
+                document.getElementById('setting-debug').value = s.debug ? 'true' : 'false';
+            }
+        } catch(e) {}
+    }
+    loadSettings();
+
+    window.saveSettings = async function() {
+        const body = {
+            server_name: document.getElementById('setting-server-name').value,
+            session_timeout: parseInt(document.getElementById('setting-timeout').value),
+            theme: document.getElementById('setting-theme').value,
+            debug: document.getElementById('setting-debug').value === 'true'
+        };
+        try {
+            const resp = await fetch('/api/settings', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+                body: JSON.stringify(body)
+            });
+            const result = await resp.json();
+            if (result.status === 'success') {
+                showNotification('SETTINGS_SAVED');
+                // Apply theme immediately
+                if (window.applyTheme) window.applyTheme(body.theme);
+                if (body.server_name) document.title = "DASHBOARD // " + body.server_name;
+            } else {
+                showNotification('ERROR: ' + result.message);
+            }
+        } catch(e) { showNotification('ERROR: ' + e.message); }
+    };
+
+    window.changePassword = async function() {
+        const oldPwd = document.getElementById('old-password').value;
+        const newPwd = document.getElementById('new-password').value;
+        const confirmPwd = document.getElementById('confirm-password').value;
+
+        if (!oldPwd || !newPwd) {
+            showNotification('ERROR: All fields required');
+            return;
+        }
+        if (newPwd !== confirmPwd) {
+            showNotification('ERROR: Passwords do not match');
+            return;
+        }
+
+        try {
+            const resp = await fetch('/api/change-password', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+                body: JSON.stringify({ old_password: oldPwd, new_password: newPwd })
+            });
+            const result = await resp.json();
+            if (result.status === 'success') {
+                showNotification('PASSWORD_CHANGED');
+                document.getElementById('old-password').value = '';
+                document.getElementById('new-password').value = '';
+                document.getElementById('confirm-password').value = '';
+            } else {
+                showNotification('ERROR: ' + result.message);
+            }
+        } catch(e) { showNotification('ERROR: ' + e.message); }
+    };
+})();
+</script>

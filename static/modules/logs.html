@@ -1,0 +1,106 @@
+<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:15px;">
+    <div class="section-header" style="margin-bottom:0;">
+        <h3>Global Event Logs</h3>
+    </div>
+    <div style="display:flex; gap:10px; align-items:center;">
+        <select id="log-level-filter" class="form-input" style="width:150px; height:32px; font-size:11px;" onchange="filterLogs()">
+            <option value="">ALL_LEVELS</option>
+            <option value="SYS">SYSTEM</option>
+            <option value="C2">C2</option>
+            <option value="TASK">TASK</option>
+            <option value="NET">NETWORK</option>
+            <option value="SEC">SECURITY</option>
+            <option value="ERR">ERROR</option>
+            <option value="CHAT">CHAT</option>
+        </select>
+        <label style="font-family:'JetBrains Mono'; font-size:10px; color:#888; display:flex; align-items:center; gap:5px;">
+            <input type="checkbox" id="log-autoscroll" checked> AUTO_SCROLL
+        </label>
+        <button class="btn-primary" style="height:32px; font-size:11px;" onclick="clearLogView()">
+            <i class="fas fa-eraser"></i> CLEAR
+        </button>
+    </div>
+</div>
+
+<div class="list-container" style="height:550px; display:flex; flex-direction:column;">
+    <div class="beacons-header-bar" style="grid-template-columns:80px 80px 1fr;">
+        <span>TIME</span>
+        <span>LEVEL</span>
+        <span>MESSAGE</span>
+    </div>
+    <div id="log-stream-body" style="flex:1; overflow-y:auto; padding:10px 20px; font-family:'JetBrains Mono'; font-size:11px;">
+        <div style="text-align:center; color:#444; padding:20px;">CONNECTING_TO_LOG_STREAM...</div>
+    </div>
+</div>
+
+<script>
+(function() {
+    const logBody = document.getElementById('log-stream-body');
+    let logEntries = [];
+    let wsConnected = false;
+
+    const levelColors = {
+        'SYS': '#4caf50', 'C2': '#2196f3', 'TASK': '#ff9800', 'NET': '#00bcd4',
+        'SEC': '#9c27b0', 'ERR': '#f44336', 'CHAT': '#e0e0e0', 'GEN': '#ff9800',
+        'CONFIG': '#795548', 'FILE': '#607d8b', 'PROXY': '#3f51b5', 'INFO': '#888'
+    };
+
+    function addLogEntry(time, level, message) {
+        logEntries.push({ time, level, message });
+        if (logEntries.length > 500) logEntries.shift();
+        renderFilteredLogs();
+    }
+
+    function renderFilteredLogs() {
+        if (!logBody) return;
+        const filter = document.getElementById('log-level-filter')?.value || '';
+        const filtered = filter ? logEntries.filter(e => e.level === filter) : logEntries;
+
+        logBody.innerHTML = filtered.map(e => {
+            const color = levelColors[e.level] || '#888';
+            return `<div style="margin-bottom:3px; display:flex; gap:10px;">
+                <span style="color:rgba(255,255,255,0.25); min-width:60px;">[${e.time}]</span>
+                <span style="color:${color}; font-weight:bold; min-width:60px;">[${e.level}]</span>
+                <span style="color:#eee;">${e.message}</span>
+            </div>`;
+        }).join('');
+
+        if (document.getElementById('log-autoscroll')?.checked) {
+            logBody.scrollTop = logBody.scrollHeight;
+        }
+    }
+
+    window.filterLogs = renderFilteredLogs;
+    window.clearLogView = function() {
+        logEntries = [];
+        if (logBody) logBody.innerHTML = '<div style="text-align:center; color:#444; padding:20px;">LOG_CLEARED</div>';
+    };
+
+    // Connect to WebSocket for real-time logs
+    function connectLogWS() {
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
+
+        ws.onopen = () => {
+            wsConnected = true;
+            if (logBody) logBody.innerHTML = '';
+        };
+
+        ws.onmessage = (event) => {
+            try {
+                const log = JSON.parse(event.data);
+                addLogEntry(log.time || new Date().toLocaleTimeString('en-GB',{hour12:false}), log.level || 'INFO', log.message || event.data);
+            } catch(e) {
+                addLogEntry(new Date().toLocaleTimeString('en-GB',{hour12:false}), 'INFO', event.data);
+            }
+        };
+
+        ws.onclose = () => {
+            wsConnected = false;
+            setTimeout(connectLogWS, 3000);
+        };
+    }
+
+    connectLogWS();
+})();
+</script>

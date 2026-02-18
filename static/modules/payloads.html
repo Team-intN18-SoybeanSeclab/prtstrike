@@ -1,0 +1,328 @@
+<div class="section-header" style="display: flex; justify-content: space-between; align-items: center;">
+    <h3>Stager / Payload Generator</h3>
+</div>
+
+<div class="builder-section">
+    <div>
+        <div class="form-group">
+            <label>Target OS</label>
+            <select class="form-input" id="payload-os" onchange="updatePayloadTypeOptions()">
+                <option value="windows">Windows</option>
+                <option value="linux">Linux</option>
+            </select>
+        </div>
+        <div class="form-group">
+            <label>Payload Type</label>
+            <select class="form-input" id="payload-type" onchange="updatePayloadFields()">
+            </select>
+        </div>
+        <div class="form-group">
+            <label>Payload Name</label>
+            <input type="text" class="form-input" id="payload-name" placeholder="beacon_http" value="beacon_default">
+        </div>
+        <div class="form-group">
+            <label>Associated Listener</label>
+            <select class="form-input" id="payload-listener" onchange="updatePayloadTypeOptions(); updateCallbackFromListener();">
+                <option value="">Loading listeners...</option>
+            </select>
+        </div>
+    </div>
+    <div>
+        <div class="form-group">
+            <label>Callback Host</label>
+            <input type="text" class="form-input" id="payload-callback-host" placeholder="e.g. 192.168.1.100">
+            <div style="font-size:9px; color:#555; margin-top:3px; font-family:'JetBrains Mono';">beacon connect-back IP / domain</div>
+        </div>
+        <div class="form-group">
+            <label>Callback Port</label>
+            <input type="number" class="form-input" id="payload-callback-port" placeholder="8443">
+            <div style="font-size:9px; color:#555; margin-top:3px; font-family:'JetBrains Mono';">override for NAT/redirect, defaults to listener port</div>
+        </div>
+        <div class="form-group" id="arch-group">
+            <label>Architecture</label>
+            <select class="form-input" id="payload-arch">
+                <option value="amd64">x64 (amd64)</option>
+                <option value="386">x86 (386)</option>
+            </select>
+        </div>
+        <div class="form-group">
+            <label>Sleep Delay (Seconds)</label>
+            <input type="number" class="form-input" id="payload-sleep" value="60">
+        </div>
+        <div class="form-group">
+            <label>Jitter (%)</label>
+            <input type="number" class="form-input" id="payload-jitter" value="20">
+        </div>
+    </div>
+</div>
+
+<!-- Type description hint -->
+<div id="type-hint" style="margin-top:8px; padding:8px 14px; font-size:11px; font-family:'JetBrains Mono',monospace; color:var(--accent); opacity:0.6; border-left:2px solid var(--accent);"></div>
+
+<div style="margin-top:15px; display:flex; justify-content:flex-end;">
+    <button class="btn-primary" id="generate-btn" onclick="generatePayload()">
+        <i class="fas fa-hammer"></i> GENERATE_ARTIFACT
+    </button>
+</div>
+
+<!-- Generated Payloads List -->
+<div style="margin-top: 30px;">
+    <div class="section-header">
+        <h3>Generated Artifacts</h3>
+    </div>
+    <div class="list-container" style="overflow-x:auto;">
+        <div class="beacons-header-bar" style="grid-template-columns: 0.8fr 1fr 1fr 0.6fr 0.6fr 0.6fr 0.8fr 120px; min-width:700px;">
+            <span>ID</span>
+            <span>Name</span>
+            <span>Type</span>
+            <span>OS</span>
+            <span>Arch</span>
+            <span>Size</span>
+            <span>Created</span>
+            <span style="text-align:right;">Actions</span>
+        </div>
+        <div id="payloads-list" style="max-height:300px; overflow-y:auto;">
+            <div style="padding:30px; text-align:center; opacity:0.3; font-family:'JetBrains Mono';">LOADING...</div>
+        </div>
+    </div>
+</div>
+
+<script>
+(function() {
+    const typesByOS = {
+        windows: [
+            { value: 'executable',    label: 'Executable (EXE)',        needsArch: true,  hint: 'Go implant compiled to Windows PE executable' },
+            { value: 'powershell',    label: 'PowerShell Stager (PS1)', needsArch: false, hint: 'PowerShell script beacon, fileless execution via IEX' },
+            { value: 'shellcode_bin', label: 'Raw PE (BIN)',              needsArch: true,  hint: 'Raw PE bytes exported as .bin, for use with custom loaders' },
+            { value: 'shellcode_raw', label: 'Raw PE (RAW)',            needsArch: true,  hint: 'Raw PE bytes exported as .raw, for use with custom loaders' },
+            { value: 'shellcode_c',   label: 'RunPE Loader (C)',        needsArch: true,  hint: 'C source with embedded PE + RunPE reflective loader, ready to compile' },
+            { value: 'shellcode_csharp', label: 'RunPE Loader (C#)',    needsArch: true,  hint: 'C# source with embedded PE + P/Invoke RunPE loader, csc compile ready' },
+            { value: 'shellcode_go',  label: 'RunPE Loader (Go)',       needsArch: true,  hint: 'Go source with embedded PE + syscall RunPE loader, go build ready' },
+            { value: 'python',        label: 'Python Stager (PY)',      needsArch: false, hint: 'Python3 beacon script, cross-platform compatible' },
+        ],
+        linux: [
+            { value: 'executable',    label: 'Executable (ELF)',        needsArch: true,  hint: 'Go implant compiled to Linux ELF binary' },
+            { value: 'python',        label: 'Python Stager (PY)',      needsArch: false, hint: 'Python3 beacon script, no compilation required' },
+            { value: 'bash',          label: 'Shell Script (SH)',       needsArch: false, hint: 'Bash beacon using curl, minimal dependencies' },
+            { value: 'shellcode_bin', label: 'Raw ELF (BIN)',             needsArch: true,  hint: 'Raw ELF bytes exported as .bin, for use with custom loaders' },
+            { value: 'shellcode_raw', label: 'Raw ELF (RAW)',           needsArch: true,  hint: 'Raw ELF bytes exported as .raw, for use with custom loaders' },
+            { value: 'shellcode_c',   label: 'RunPE Loader (C)',        needsArch: true,  hint: 'C source with embedded ELF + memfd_create loader, gcc compile ready' },
+        ]
+    };
+
+    const typeIcons = {
+        'executable': 'fa-cube',
+        'powershell': 'fa-terminal',
+        'shellcode_bin': 'fa-microchip',
+        'shellcode_raw': 'fa-file-code',
+        'shellcode_c': 'fa-microchip',
+        'shellcode_csharp': 'fa-microchip',
+        'shellcode_go': 'fa-microchip',
+        'python': 'fa-code',
+        'bash': 'fa-scroll',
+    };
+
+    const osIcons = {
+        'windows': '<i class="fab fa-windows" style="color:#0078d4;"></i>',
+        'linux': '<i class="fab fa-linux" style="color:#f5a623;"></i>',
+    };
+
+    function formatFileSize(bytes) {
+        if (!bytes || bytes === 0) return '-';
+        if (bytes < 1024) return bytes + ' B';
+        if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+        return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
+    }
+
+    function getTypeLabel(type, os) {
+        const types = typesByOS[os] || typesByOS['windows'];
+        const found = types.find(t => t.value === type);
+        return found ? found.label : type.toUpperCase();
+    }
+
+    window.updatePayloadTypeOptions = function() {
+        const os = document.getElementById('payload-os').value;
+        const typeSelect = document.getElementById('payload-type');
+        let types = typesByOS[os] || [];
+
+        const listenerSel = document.getElementById('payload-listener');
+        const selectedOpt = listenerSel ? listenerSel.selectedOptions[0] : null;
+        const isTCP = selectedOpt && selectedOpt.getAttribute('data-type') === 'reverse_tcp';
+
+        if (isTCP) {
+            types = types.filter(t => t.value !== 'powershell');
+        }
+
+        typeSelect.innerHTML = types.map(t =>
+            `<option value="${t.value}">${t.label}</option>`
+        ).join('');
+
+        updatePayloadFields();
+    };
+
+    window.updatePayloadFields = function() {
+        const os = document.getElementById('payload-os').value;
+        const type = document.getElementById('payload-type').value;
+        const archGroup = document.getElementById('arch-group');
+        const hint = document.getElementById('type-hint');
+
+        const types = typesByOS[os] || [];
+        const typeInfo = types.find(t => t.value === type);
+
+        if (archGroup) {
+            archGroup.style.display = (typeInfo && typeInfo.needsArch) ? '' : 'none';
+        }
+        if (hint && typeInfo) {
+            hint.textContent = '> ' + typeInfo.hint;
+        }
+    };
+
+    window.updateCallbackFromListener = function() {
+        const listenerSel = document.getElementById('payload-listener');
+        if (!listenerSel) return;
+        const selectedId = listenerSel.value;
+        const listener = allListeners.find(l => l.id === selectedId);
+        if (listener) {
+            const hostInput = document.getElementById('payload-callback-host');
+            const portInput = document.getElementById('payload-callback-port');
+            const ip = (listener.bind_ip === '0.0.0.0' || listener.bind_ip === '::') ? '' : listener.bind_ip;
+            hostInput.value = ip;
+            hostInput.placeholder = ip ? 'e.g. 192.168.1.100' : 'listener binds 0.0.0.0, fill your IP';
+            portInput.value = listener.port;
+        }
+    };
+
+    let allListeners = [];
+
+    async function loadListeners() {
+        try {
+            const resp = await fetch('/api/listeners', { headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+            const result = await resp.json();
+            const sel = document.getElementById('payload-listener');
+            if (!sel) return;
+            allListeners = (result.status === 'success' && result.data) ? result.data : [];
+            if (allListeners.length > 0) {
+                sel.innerHTML = allListeners.map(l => {
+                    const proto = l.type === 'reverse_tcp' ? 'TCP' : 'HTTP';
+                    return `<option value="${l.id}" data-type="${l.type}">${l.name} [${proto}] (${l.bind_ip}:${l.port})</option>`;
+                }).join('');
+            } else {
+                sel.innerHTML = '<option value="">No listeners available</option>';
+            }
+            updatePayloadTypeOptions();
+            updateCallbackFromListener();
+        } catch(e) { console.error(e); }
+    }
+
+    async function loadPayloads() {
+        try {
+            const resp = await fetch('/api/payloads', { headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+            const result = await resp.json();
+            const container = document.getElementById('payloads-list');
+            if (!container) return;
+            const payloads = result.data || [];
+            if (payloads.length === 0) {
+                container.innerHTML = '<div style="padding:30px; text-align:center; opacity:0.3; font-family:\'JetBrains Mono\';">NO_ARTIFACTS_GENERATED</div>';
+                return;
+            }
+            container.innerHTML = payloads.map(p => {
+                const icon = typeIcons[p.type] || 'fa-file';
+                const osIcon = osIcons[p.os] || '';
+                const typeLabel = getTypeLabel(p.type, p.os);
+                return `
+                <div class="beacon-row" style="grid-template-columns: 0.8fr 1fr 1fr 0.6fr 0.6fr 0.6fr 0.8fr 120px; padding:10px 20px;">
+                    <span style="font-family:'JetBrains Mono'; font-size:11px; color:var(--accent);">${p.id}</span>
+                    <span><i class="fas ${icon}" style="margin-right:6px; opacity:0.5;"></i>${p.name}</span>
+                    <span style="font-size:11px; text-transform:uppercase;">${typeLabel}</span>
+                    <span>${osIcon} ${(p.os || 'N/A').toUpperCase()}</span>
+                    <span style="font-size:11px; color:#888;">${p.arch || '-'}</span>
+                    <span style="font-size:11px; color:#888; font-family:'JetBrains Mono';">${formatFileSize(p.file_size)}</span>
+                    <span style="font-size:11px; color:#888;">${new Date(p.created_at).toLocaleString()}</span>
+                    <span style="text-align:right; display:flex; gap:10px; justify-content:flex-end;">
+                        <a href="${p.download_url}" download style="color:var(--accent); text-decoration:none; font-size:11px;" title="Download">
+                            <i class="fas fa-download"></i>
+                        </a>
+                        <span style="color:#ff3b30; cursor:pointer; font-size:11px;" onclick="deletePayload('${p.id}')" title="Delete">
+                            <i class="fas fa-trash"></i>
+                        </span>
+                    </span>
+                </div>
+            `}).join('');
+        } catch(e) { console.error(e); }
+    }
+
+    window.generatePayload = async function() {
+        const btn = document.getElementById('generate-btn');
+        btn.disabled = true;
+        btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> BUILDING...';
+
+        const callbackPort = parseInt(document.getElementById('payload-callback-port').value);
+
+        const body = {
+            name: document.getElementById('payload-name').value,
+            type: document.getElementById('payload-type').value,
+            listener_id: document.getElementById('payload-listener').value,
+            callback_host: document.getElementById('payload-callback-host').value.trim(),
+            callback_port: callbackPort || 0,
+            os: document.getElementById('payload-os').value,
+            arch: document.getElementById('payload-arch').value,
+            sleep: parseInt(document.getElementById('payload-sleep').value) || 60,
+            jitter: parseInt(document.getElementById('payload-jitter').value) || 10
+        };
+
+        if (!body.listener_id) {
+            showNotification('ERROR: No listener selected');
+            btn.disabled = false;
+            btn.innerHTML = '<i class="fas fa-hammer"></i> GENERATE_ARTIFACT';
+            return;
+        }
+
+        if (!body.callback_host) {
+            showNotification('ERROR: Callback Host is required');
+            btn.disabled = false;
+            btn.innerHTML = '<i class="fas fa-hammer"></i> GENERATE_ARTIFACT';
+            return;
+        }
+
+        if (!body.callback_port || body.callback_port <= 0) {
+            showNotification('ERROR: Callback Port is required');
+            btn.disabled = false;
+            btn.innerHTML = '<i class="fas fa-hammer"></i> GENERATE_ARTIFACT';
+            return;
+        }
+
+        try {
+            const resp = await fetch('/api/payloads', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+                body: JSON.stringify(body)
+            });
+            const result = await resp.json();
+            if (result.status === 'success') {
+                showNotification('ARTIFACT_GENERATED: ' + body.name + ' [' + body.type + '/' + body.os + ']');
+                loadPayloads();
+            } else {
+                showNotification('ERROR: ' + result.message);
+            }
+        } catch(e) { showNotification('ERROR: ' + e.message); }
+
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fas fa-hammer"></i> GENERATE_ARTIFACT';
+    };
+
+    window.deletePayload = async function(id) {
+        if (!confirm('Delete this payload?')) return;
+        try {
+            const resp = await fetch('/api/payloads/' + id, { method: 'DELETE', headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+            const result = await resp.json();
+            showNotification(result.message);
+            loadPayloads();
+        } catch(e) { showNotification('ERROR: ' + e.message); }
+    };
+
+    // Initialize
+    loadListeners();
+    loadPayloads();
+    updatePayloadTypeOptions();
+})();
+</script>

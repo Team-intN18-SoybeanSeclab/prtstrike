@@ -1,0 +1,67 @@
+<!-- Header bar -->
+<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:15px; flex-wrap:wrap; gap:10px;">
+    <div class="section-header" style="margin-bottom:0;">
+        <h3>Active Beacons Inventory</h3>
+    </div>
+    <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+        <select id="beacon-filter-status" class="form-input" style="width:130px; height:32px; font-size:11px;" onchange="filterBeacons()">
+            <option value="">ALL</option>
+            <option value="online">ONLINE</option>
+            <option value="offline">OFFLINE</option>
+        </select>
+        <select id="beacon-filter-group" class="form-input" style="width:130px; height:32px; font-size:11px;" onchange="filterBeacons()">
+            <option value="">ALL_GROUPS</option>
+        </select>
+        <span style="font-family:'JetBrains Mono';font-size:10px;color:#666;">
+            <span id="beacon-count" style="color:var(--success);">0</span> online / <span id="beacon-total" style="color:#888;">0</span> total
+        </span>
+    </div>
+</div>
+
+<div class="list-container" style="overflow-x:auto;">
+    <div class="beacons-header-bar" style="grid-template-columns: 40px 1fr 140px 140px 1fr 100px 100px 120px 100px; min-width:880px;">
+        <span></span>
+        <span>HOST / ID</span>
+        <span>EXT IP</span>
+        <span>USER</span>
+        <span>PROCESS</span>
+        <span>LAST SEEN</span>
+        <span>SLEEP</span>
+        <span>STATUS</span>
+        <span>ACTIONS</span>
+    </div>
+    <div class="beacons-list" id="beacons-list-body" style="overflow-x:auto;">
+        <div style="padding: 40px; text-align: center; opacity: 0.3; font-family: 'JetBrains Mono';">
+            INITIALIZING_CLIENT_DISCOVERY...
+        </div>
+    </div>
+</div>
+
+<script>
+(function() {
+    window.filterBeacons = function() {
+        const status = document.getElementById('beacon-filter-status')?.value || '';
+        const group = document.getElementById('beacon-filter-group')?.value || '';
+        if (typeof fetchClients === 'function') fetchClients();
+    };
+
+    function updateBeaconCounts() {
+        if (typeof state !== 'undefined' && state.clients) {
+            const countEl = document.getElementById('beacon-count');
+            const totalEl = document.getElementById('beacon-total');
+            if (countEl) countEl.textContent = state.clients.filter(c => c.status === 'online').length;
+            if (totalEl) totalEl.textContent = state.clients.length;
+
+            const groupEl = document.getElementById('beacon-filter-group');
+            if (groupEl && state.clients.length > 0) {
+                const groups = [...new Set(state.clients.map(c => c.group).filter(g => g))];
+                const currentVal = groupEl.value;
+                groupEl.innerHTML = '<option value="">ALL_GROUPS</option>' +
+                    groups.map(g => `<option value="${g}"${g === currentVal ? ' selected' : ''}>${g}</option>`).join('');
+            }
+        }
+    }
+
+    setTimeout(updateBeaconCounts, 500);
+})();
+</script>
