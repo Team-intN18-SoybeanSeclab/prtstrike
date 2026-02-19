@@ -51,6 +51,8 @@ type Client struct {
 	LastCheck   time.Time `json:"last_check"`
 	Sleep       int       `json:"sleep"`
 	Jitter      int       `json:"jitter"`
+	Country     string    `json:"country"`
+	CountryCode string    `json:"country_code"`
 }
 
 type Listener struct {

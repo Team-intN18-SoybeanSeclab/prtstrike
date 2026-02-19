@@ -1,4 +1,4 @@
-module new_c2
+module prtstrike
 
 go 1.25.5
 

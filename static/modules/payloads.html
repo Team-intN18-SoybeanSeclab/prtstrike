@@ -53,6 +53,16 @@
             <label>Jitter (%)</label>
             <input type="number" class="form-input" id="payload-jitter" value="20">
         </div>
+        <div class="form-group">
+            <label>Allowed IPs (Whitelist)</label>
+            <input type="text" class="form-input" id="payload-allowed-ips" placeholder="e.g. 192.168.1.0/24, 10.0.0.5">
+            <div style="font-size:9px; color:#555; margin-top:3px; font-family:'JetBrains Mono';">comma-separated CIDR/IPs, empty = allow all</div>
+        </div>
+        <div class="form-group">
+            <label>Blocked IPs (Blacklist)</label>
+            <input type="text" class="form-input" id="payload-blocked-ips" placeholder="e.g. 35.232.0.0/16">
+            <div style="font-size:9px; color:#555; margin-top:3px; font-family:'JetBrains Mono';">beacon exits if public IP matches</div>
+        </div>
     </div>
 </div>
 
@@ -267,7 +277,9 @@
             os: document.getElementById('payload-os').value,
             arch: document.getElementById('payload-arch').value,
             sleep: parseInt(document.getElementById('payload-sleep').value) || 60,
-            jitter: parseInt(document.getElementById('payload-jitter').value) || 10
+            jitter: parseInt(document.getElementById('payload-jitter').value) || 10,
+            allowed_ips: (document.getElementById('payload-allowed-ips')?.value || '').trim(),
+            blocked_ips: (document.getElementById('payload-blocked-ips')?.value || '').trim()
         };
 
         if (!body.listener_id) {

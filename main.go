@@ -126,6 +126,10 @@ func main() {
 			auth.POST("/settings", handleSaveSettings)
 			auth.POST("/change-password", handleChangePassword)
 			auth.POST("/quick-command", handleQuickCommand)
+
+			// Callback filter routes
+			auth.GET("/filters", handleGetFilters)
+			auth.POST("/filters", handleUpdateFilters)
 		}
 	}
 

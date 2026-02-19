@@ -13,7 +13,7 @@
 
 ## 0x01 Introduction
 
-PRTSTRIKE，一个轻便、小巧、快捷的轻量化C&C框架，由**Go**编写，最快可**1分钟**部署完成。Build后大小仅**30MB**，***截止2026.2.18，微步0检出***。
+PRTSTRIKE，一个轻便、小巧、快捷的轻量化C&C框架，由**Go**编写，最快可**1分钟**部署完成。Build后大小仅**30MB**。
 
 ## 0x02 Quick Start
 
@@ -28,9 +28,19 @@ go run .
 
 目前，本工具支持如下功能：
 1. 隧道
-2. 屏幕截图
-3. 文件浏览器
-4. 生成Shellcode，EXE，ELF等形式的Payloads
+2. 拓扑图
+3. 屏幕截图
+4. 文件浏览器
+5. 生成各种形式的Payloads
+   - EXE
+   - ELF
+   - BIN
+   - RAW
+   - Shellcode
+6. 回连过滤
+   - 过滤开机时间小于30m的机器
+   - 过滤黑/白名单IP的机器
+   - 过滤CPU内存小于2H2G的机器
 
 ## 0x03 Precautions
 
@@ -48,7 +58,21 @@ go env -w GOPROXY=https://goproxy.cn,direct
 
 - 本工具隧道部分依赖Chisel，已放在tools目录中，不放心的师傅可以前往[Chisel Github仓库](https://github.com/jpillora/chisel)自行下载
 
-## 0x04 Disclaimer
+## 0x04 How to use
+
+1. 使用命令`go run .`启动本工具
+2. 访问`http://[IP]:8083`
+3. 使用默认账户`Adm1nstr@t0r`和密码`Pr3c1se5!@#$%`登录
+4. 登录成功后，点击**LISTENER**并添加一个监听
+![](./readme/step4.png)
+5. 添加成功后，点击**PAYLOADS**生成一个木马
+![](./readme/step5.png)
+6. 生成成功后，即可使用。
+7. 若你是内网穿透，请将监听的IP和端口填写为内网IP和端口，PAYLOADS处填写内网穿透的IP和端口
+8. 在TYPOLOGY处，可以查看拓扑图
+![](./readme/step8.png)
+
+## 0x05 Disclaimer
 
 1. 您的下载、安装、使用或修改本工具及相关代码，意味着您对本工具的信任。
 2. 本工具在使用过程中可能对您或他人造成损失或伤害，若发生此类情况，我们不承担任何责任。

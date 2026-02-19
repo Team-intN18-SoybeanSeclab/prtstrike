@@ -65,11 +65,11 @@
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
     <style>
         :root {
-            --bg: #0a0a0a; /* 稍微调亮一点，从 #050505 改为 #0a0a0a */
+            --bg: #0a0a0a;
             --surface: #121212;
             --accent: #7d8e8e;
             --accent-alt: #ff9d00; 
-            --text-main: #e0e0e0; /* 统一文字颜色 */
+            --text-main: #e0e0e0;
             --text-dim: rgba(255, 255, 255, 0.25);
             --border: rgba(255, 255, 255, 0.08);
             --danger: #ff3b30;
@@ -100,7 +100,6 @@
             position: relative;
         }
 
-        /* 转场黑幕 - 与 index.php 完全一致的物理衔接 */
         .entrance-overlay {
             position: fixed;
             top: 0;
@@ -108,7 +107,7 @@
             width: 100%;
             height: 100%;
             background: #000;
-            z-index: 10000; /* 统一 z-index */
+            z-index: 10000;
             display: flex;
             flex-direction: column;
             align-items: center;
@@ -123,7 +122,6 @@
             pointer-events: none;
         }
 
-        /* 系统日志流样式 - 严禁修改 */
         .curtain-logs-fixed {
             position: absolute;
             top: 0;
@@ -134,7 +132,7 @@
             font-family: 'JetBrains Mono', monospace;
             font-size: 9px;
             color: var(--accent);
-            opacity: 0.2; /* 统一透明度 */
+            opacity: 0.2;
             overflow: hidden;
             pointer-events: none;
             display: block;
@@ -163,7 +161,6 @@
             100% { transform: translate(0); text-shadow: 2px 0 var(--glitch-red), -2px 0 var(--glitch-cyan); }
         }
 
-        /* 背景装饰 */
         .side-numbers {
             position: fixed;
             top: 0;
@@ -181,7 +178,6 @@
             user-select: none;
         }
 
-        /* 战术外框样式 - 严禁修改 */
         .curtain-brackets-fixed {
             position: absolute;
             top: 50%;
@@ -205,7 +201,6 @@
         .curtain-brackets-fixed::before { top: -2px; left: -2px; border-right: 0; border-bottom: 0; }
         .curtain-brackets-fixed::after { bottom: -2px; right: -2px; border-left: 0; border-top: 0; }
 
-        /* 统一的加载容器布局 - 严禁修改 */
         .loading-container-fixed {
             position: relative;
             z-index: 2;
@@ -321,8 +316,8 @@
             font-family: 'JetBrains Mono', monospace;
             font-size: 10px;
             color: var(--accent);
-            opacity: 0.2; /* 与 index 对齐 */
-            letter-spacing: 5px; /* 与 index 对齐 */
+            opacity: 0.2;
+            letter-spacing: 5px;
             z-index: 10;
             pointer-events: none;
         }
@@ -473,7 +468,6 @@
             outline: none;
         }
 
-        /* 全局容器布局调整 */
         .app-wrapper {
             display: flex;
             flex-direction: column;
@@ -483,7 +477,7 @@
             position: relative;
             z-index: 10;
             opacity: 1;
-            padding-top: 80px; /* 为固定的 Header 留出空间 */
+            padding-top: 80px;
         }
 
         .app-body {
@@ -509,28 +503,25 @@
             padding-bottom: 15px;
         }
 
-        /* 左侧侧边栏 (若依风格) */
-        /* 极致衔接：继承 index.php 的立绘作为底层背景 */
         .char-reveal-legacy {
             position: fixed;
             bottom: 0;
             right: 0;
             height: 90vh;
-            z-index: -1; /* 移动到最底层 */
-            opacity: 0.1; /* 降低透明度，使其更像背景 */
-            filter: grayscale(100%) contrast(1.2); /* 灰度处理，减少干扰 */
+            z-index: -1;
+            opacity: 0.1;
+            filter: grayscale(100%) contrast(1.2);
             pointer-events: none;
             transition: all 1s ease;
         }
 
-        /* 衔接 index.php 的扫描线余韵 */
         .gacha-scan-legacy {
             position: fixed;
             width: 100%;
             height: 2px;
             background: linear-gradient(90deg, transparent, var(--accent), transparent);
             top: 0;
-            z-index: 10001; /* 在遮罩之上 */
+            z-index: 10001;
             opacity: 0;
             box-shadow: 0 0 20px var(--accent);
             pointer-events: none;
@@ -541,7 +532,6 @@
             0% { top: 0; opacity: 1; }
             100% { top: 100%; opacity: 0; }
         }
-        /* Welcome 界面样式 */
         .welcome-screen {
             flex: 1;
             display: flex;
@@ -560,12 +550,11 @@
             letter-spacing: 20px;
             margin-bottom: 20px;
             text-shadow: 0 0 30px rgba(125, 142, 142, 0.3);
-            opacity: 1; /* 移除初始透明，实现即时显示 */
-            transform: none; /* 移除初始缩放 */
+            opacity: 1;
+            transform: none;
         }
 
         body.revealed .welcome-title {
-            /* 移除 animation */
         }
 
         .welcome-subtitle {
@@ -629,7 +618,6 @@
         }
 
         body.revealed .welcome-subtitle {
-            /* 移除 animation */
         }
 
         @keyframes welcomeFadeIn {
@@ -642,7 +630,6 @@
             to { opacity: 1; }
         }
 
-        /* 优化内容揭示动画 */
         @keyframes contentReveal {
             0% { 
                 opacity: 0; 
@@ -656,19 +643,16 @@
             }
         }
 
-        /* 覆盖之前的样式 */
         .sidebar {
             z-index: 100;
         }
 
-        /* 初始状态：不再隐藏，配合 app-wrapper 的即时显示 */
-        .sidebar, 
+        .sidebar,
         header {
             opacity: 1;
             will-change: transform, opacity;
         }
 
-        /* 移除动画：让 dashboard 只有一个黑幕推开的入场动画 */
         body.revealed .sidebar {
             animation: none;
         }
@@ -677,7 +661,6 @@
             animation: none;
         }
 
-        /* 顶部扫描线装饰 (仅在 revealed 后出现) */
         .scan-line-overlay {
             position: fixed;
             top: 0;
@@ -696,7 +679,6 @@
             opacity: 0.3;
         }
 
-        /* C&C 战术侧边栏样式 */
         .sidebar {
             width: 240px;
             height: 100%;
@@ -712,7 +694,6 @@
             overflow: hidden;
         }
 
-        /* 扫描线效果 */
         .sidebar::after {
             content: "";
             position: absolute;
@@ -739,7 +720,6 @@
             );
         }
 
-        /* 弹窗样式 */
         .modal-overlay {
             position: fixed;
             top: 0; left: 0; width: 100%; height: 100%;
@@ -920,7 +900,6 @@
             background: rgba(125, 142, 142, 0.2);
             border-color: var(--accent);
             box-shadow: 0 0 15px rgba(125, 142, 142, 0.3);
-            /* 移除 transform: translateX(5px) */
         }
 
         .nav-item.active::before {
@@ -939,7 +918,6 @@
             text-shadow: 0 0 10px var(--danger);
         }
 
-        /* Welcome 界面样式 */
         .welcome-screen {
             height: 100%;
             display: flex;
@@ -968,7 +946,6 @@
             opacity: 0.6;
         }
 
-        /* 页面切换逻辑 */
         .content-page {
             display: none;
             height: 100%;
@@ -987,12 +964,12 @@
             font-size: 16px;
             display: flex;
             justify-content: center;
-            opacity: 0.6; /* 统一降低图标亮度 */
+            opacity: 0.6;
             transition: opacity 0.2s;
         }
 
         .nav-item:hover i, .nav-item.active i {
-            opacity: 1; /* 激活时恢复亮度 */
+            opacity: 1;
         }
 
         .nav-label {
@@ -1000,7 +977,6 @@
             text-transform: uppercase;
         }
 
-        /* 顶部状态栏样式修复 (参考 CobaltStrike/Viper) */
         .rhine-data-stream {
             font-family: 'JetBrains Mono', monospace;
             font-size: 10px;
@@ -1053,7 +1029,6 @@
             text-shadow: 0 0 8px rgba(125, 142, 142, 0.4);
         }
 
-        /* 战术注销按钮 (参考 Sliver/C&C) */
         .logout-link {
             font-family: 'JetBrains Mono', monospace;
             font-size: 10px;
@@ -1119,9 +1094,6 @@
             100% { left: 100%; }
         }
 
-        /* 右侧主容器 - 使用 app-body 中的 flex: 1 定义 (line ~442) */
-
-        /* 顶部导航 (调整后) */
         header {
             position: fixed;
             top: 0;
@@ -1140,7 +1112,6 @@
             box-shadow: 0 10px 40px rgba(0, 0, 0, 0.9);
         }
 
-        /* 主体内容区 */
         main {
             flex: 1;
             padding: 20px;
@@ -1290,7 +1261,6 @@
         .process-status.active { color: var(--success); }
         .process-id { color: var(--accent); text-align: right; opacity: 0.6; }
 
-        /* 侧边面板 */
         .side-panel {
             background: rgba(8, 8, 8, 0.4);
             border: 1px solid var(--border);
@@ -1301,7 +1271,7 @@
             -webkit-backdrop-filter: blur(15px) saturate(180%);
         }
 
-        /* 子页面通用样式 */
+        /* content page */
         .content-page {
             display: none;
         }
@@ -1313,7 +1283,7 @@
             gap: 25px;
         }
 
-        /* Welcome Page 增强 */
+        /* Welcome Page */
         .welcome-screen {
             padding: 40px;
             background: rgba(125, 142, 142, 0.05);
@@ -1329,14 +1299,12 @@
             background: var(--accent);
         }
 
-        /* 列表容器通用 */
         .list-container {
             background: rgba(15, 15, 15, 0.6);
             border: 1px solid var(--border);
             backdrop-filter: blur(10px);
         }
 
-        /* 监听器卡片视图 */
         .listeners-grid {
             display: grid;
             grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
@@ -1360,7 +1328,6 @@
             border-left: 4px solid var(--success);
         }
 
-        /* Payload 构建表单 */
         .builder-section {
             display: grid;
             grid-template-columns: 1fr 1fr;
@@ -1397,7 +1364,7 @@
             border-color: var(--accent);
         }
 
-        /* 按钮增强 */
+        /* buttons */
         .btn-primary {
             background: var(--accent);
             color: #000;
@@ -1746,6 +1713,10 @@
                         <i class="fas fa-cog"></i>
                         <span class="nav-label">SETTINGS</span>
                     </a>
+                    <a href="#" class="nav-item" data-page="topology">
+                        <i class="fas fa-project-diagram"></i>
+                        <span class="nav-label">TOPOLOGY</span>
+                    </a>
                     <a href="#" class="nav-item" data-page="logs">
                         <i class="fas fa-file-medical-alt"></i>
                         <span class="nav-label">LOGS</span>
@@ -1763,7 +1734,7 @@
                     </div>
                 </main>
 
-                <!-- 底部战术控制台 (CobaltStrike style - inside flex layout) -->
+                <!-- bottom console -->
                 <div class="bottom-console" id="bottom-console">
                     <div class="console-header">
                         <div class="console-tabs">
@@ -1803,7 +1774,7 @@
     </div>
 
     <script>
-        // --- 全局状态管理 ---
+        // --- state ---
         const state = {
             clients: [],
             ws: null,
@@ -1811,7 +1782,7 @@
             username: 'Operator'
         };
 
-        // --- WebSocket 连接 ---
+        // --- WebSocket ---
         function initWebSocket() {
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
             const wsUrl = `${protocol}//${window.location.host}/ws`;
@@ -1862,7 +1833,7 @@
             };
         }
 
-        // --- API 调用 ---
+        // --- API ---
         async function fetchUserInfo() {
             try {
                 const response = await fetch('/api/userinfo', {
@@ -1903,7 +1874,7 @@
             }
         }
 
-        // --- UI 渲染逻辑 ---
+        // --- UI render ---
         function updateMetrics() {
             const countEl = document.getElementById('count-beacons');
             if (countEl) {
@@ -1930,6 +1901,13 @@
             return Math.floor(diff / 86400) + 'd ago';
         }
 
+        function countryFlag(code) {
+            if (!code || code.length !== 2) return '';
+            return String.fromCodePoint(
+                ...Array.from(code.toUpperCase()).map(c => 0x1F1E6 + c.charCodeAt(0) - 65)
+            );
+        }
+
         function renderClients() {
             const container = document.getElementById('beacons-list-body');
             if (!container) return;
@@ -1948,8 +1926,8 @@
                 const row = document.createElement('div');
                 row.className = `beacon-row ${client.status === 'online' ? '' : 'offline'}`;
                 row.dataset.id = client.id;
-                row.style.gridTemplateColumns = '40px 1fr 140px 140px 1fr 100px 100px 120px 100px';
-                row.style.minWidth = '880px';
+                row.style.gridTemplateColumns = '40px 1fr 140px 100px 140px 1fr 100px 100px 120px 100px';
+                row.style.minWidth = '980px';
                 const osIcon = client.os.toLowerCase().includes('win') ? 'windows' : 'linux';
                 const osColor = client.os.toLowerCase().includes('win') ? '#00a4ef' : '#f0ad4e';
                 const adminBadge = client.is_admin ? '<span style="color:#ff9800;font-size:9px;margin-left:4px;" title="Admin">&#9733;</span>' : '';
@@ -1967,6 +1945,9 @@
                     <div class="ip-cell" style="display:flex;flex-direction:column;gap:2px;">
                         <span>${client.ip}</span>
                         <span style="font-size:9px;color:#555;">${ipDisplay !== client.ip ? ipDisplay : ''}</span>
+                    </div>
+                    <div style="font-size:10px; white-space:nowrap;">
+                        ${client.country_code ? countryFlag(client.country_code) + ' ' : ''}<span style="color:#888;">${client.country_code || '-'}</span>
                     </div>
                     <div style="font-family:'JetBrains Mono';">${userDisplay}</div>
                     <div style="font-size:10px;color:#888;">${client.process_name || '-'} (${client.pid || '-'})</div>
@@ -2086,16 +2067,14 @@
 
             container.appendChild(entry);
 
-            // 限制日志条数
             while (container.children.length > state.maxLogs) {
                 container.firstChild.remove();
             }
 
-            // 自动滚动到底部
             container.scrollTop = container.scrollHeight;
         }
 
-        // 生成转场日志 (与 index.php 对齐)
+        // transition logs
         function createTransitionLogs() {
             const container = document.getElementById('curtainLogs');
             if (!container) return;
@@ -2113,7 +2092,7 @@
                 'BOOTING_PRTS_SUBSYSTEM'
             ];
 
-            for(let i=0; i<120; i++) { // 对齐 index.php 的 120 条
+            for(let i=0; i<120; i++) {
                 const line = document.createElement('div');
                 line.className = 'log-line';
                 const timestamp = new Date().getTime().toString(16).toUpperCase();
@@ -2124,17 +2103,15 @@
             }
         }
 
-        // 衔接动画控制
         function revealPage() {
             const overlay = document.getElementById('entrance-overlay');
             if (overlay) {
                 overlay.classList.add('hidden');
-                // 彻底移除背景强制色由 body.revealed 的 CSS transition 处理
             }
             document.body.classList.add('revealed');
         }
 
-        // --- 模块加载逻辑 ---
+        // --- module loader ---
         async function loadModule(moduleName) {
             const container = document.getElementById('module-container');
 
@@ -2144,15 +2121,12 @@
 
                 const html = await response.text();
 
-                // 清空容器
                 container.innerHTML = `<div class="content-page active" id="page-${moduleName}"></div>`;
                 const pageEl = document.getElementById('page-' + moduleName);
 
-                // 分离 HTML 和 Script，手动执行 script 标签
                 const tempDiv = document.createElement('div');
                 tempDiv.innerHTML = html;
 
-                // 先插入非 script 内容
                 const scripts = [];
                 tempDiv.querySelectorAll('script').forEach(s => {
                     scripts.push(s.textContent);
@@ -2160,12 +2134,10 @@
                 });
                 pageEl.innerHTML = tempDiv.innerHTML;
 
-                // 再执行 script
                 scripts.forEach(code => {
                     try { new Function(code)(); } catch(e) { console.error('Module script error:', e); }
                 });
 
-                // 模块加载后的初始化逻辑
                 if (moduleName === 'beacons') {
                     renderClients();
                     updateMetrics();
@@ -2186,7 +2158,7 @@
             }
         }
 
-        // 初始化
+        // Initialize
         window.addEventListener('load', () => {
             createTransitionLogs();
             updateClock();
@@ -2196,24 +2168,24 @@
             sessionStorage.removeItem('justLoggedIn');
 
             if (justLoggedIn === 'true') {
-                // 稍作停留，让用户感觉到黑幕是从 index.php 延续过来的
+                // Brief delay for transition effect from login page
                 setTimeout(() => {
                     revealPage();
                     fetchUserInfo();
                     initWebSocket();
 
-                    // 默认加载 welcome 模块
+                    // Load default welcome module
                     loadModule('welcome');
 
                     fetchClients();
-                    // 定期刷新客户端列表
+                    // Periodically refresh client list
                     setInterval(fetchClients, 10000);
-                }, 500); // 增加衔接时长，与 index.html 的 1800ms 呼应
+                }, 500); // Transition duration synced with index.html 1800ms
                 
-                // 如果 3 秒后还没 load 完，强制显示
+                // Force reveal after timeout
                 setTimeout(revealPage, 1500);
             } else {
-                // 直接显示，跳过动画
+                // Show directly, skip animation
                 const overlay = document.getElementById('entrance-overlay');
                 if (overlay) {
                     overlay.style.transition = 'none';
@@ -2230,7 +2202,7 @@
         });
 
 
-        // 交互逻辑
+        // Interaction logic
         const modal = document.getElementById('interact-modal');
         const closeBtn = document.getElementById('close-modal');
 
@@ -2474,7 +2446,7 @@
             if (bc) bc.classList.toggle('collapsed');
         }
 
-        // 简易通知函数
+        // Toast notification
         function showNotification(msg) {
             console.log(msg);
             const bc = document.getElementById('bottom-console');
@@ -2492,7 +2464,7 @@
 
 
 
-        // 点击处理 - 只在点击 beacons 列表空白处时取消选择，不影响其他模块操作
+        // Click handler - deselect only when clicking empty area in beacons list
         document.addEventListener('click', (e) => {
             if (e.target.closest('.beacon-row') ||
                 e.target.closest('.modal-overlay') || e.target.closest('.nav-item') ||
@@ -2514,7 +2486,7 @@
 
         };
 
-        // 页面切换逻辑
+        // Page navigation logic
         const navItems = document.querySelectorAll('.nav-item[data-page]');
 
         navItems.forEach(item => {
@@ -2522,11 +2494,11 @@
                 e.preventDefault();
                 const moduleName = item.getAttribute('data-page');
 
-                // 切换导航激活状态
+                // Toggle nav active state
                 navItems.forEach(nav => nav.classList.remove('active'));
                 item.classList.add('active');
 
-                // 动态加载模块
+                // Dynamically load module
                 loadModule(moduleName);
             });
         });
@@ -2779,4 +2751,3 @@
     </script>
 </body>
 </html>
-

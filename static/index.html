@@ -14,7 +14,7 @@
             --accent: #7d8e8e;
             --bg: #0a0a0a;
             --surface: #121212;
-            --text-main: #e0e0e0; /* 统一文字颜色 */
+            --text-main: #e0e0e0;
             --text-dim: rgba(255, 255, 255, 0.25);
             --danger: #ff3b30;
             --border: rgba(255, 255, 255, 0.08);
@@ -269,7 +269,7 @@
             width: 100%;
             height: 100%;
             background: #000;
-            z-index: 10000; /* 统一 z-index */
+            z-index: 10000;
             transform: translateY(100%);
             opacity: 0;
             visibility: hidden;
@@ -290,7 +290,6 @@
             pointer-events: auto;
         }
 
-        /* 系统日志流样式 - 与 dashboard 完全同步 */
         .curtain-logs-fixed {
             position: absolute;
             top: 0;
@@ -321,7 +320,6 @@
             to { opacity: 1; transform: translateX(0); }
         }
 
-        /* 战术外框样式 - 与 dashboard 完全同步 */
         .curtain-brackets-fixed {
             position: absolute;
             top: 50%;
@@ -345,7 +343,6 @@
         .curtain-brackets-fixed::before { top: -2px; left: -2px; border-right: 0; border-bottom: 0; }
         .curtain-brackets-fixed::after { bottom: -2px; right: -2px; border-left: 0; border-top: 0; }
 
-        /* 动态装饰角样式 - 与 dashboard 完全同步 */
         .curtain-deco-fixed {
             position: absolute;
             width: 100%;
@@ -476,7 +473,7 @@
         }
 
         .transition-curtain.active .curtain-logs-fixed {
-            opacity: 0.2; /* 统一透明度 */
+            opacity: 0.2;
         }
 
         .curtain-brackets-fixed {
@@ -598,7 +595,7 @@
             font-family: 'JetBrains Mono', monospace;
             font-size: 8px;
             color: var(--accent);
-            opacity: 0.04; /* 调暗背景数字 */
+            opacity: 0.04;
             z-index: -1;
             user-select: none;
         }
@@ -610,7 +607,7 @@
                         linear-gradient(90deg, rgba(255, 0, 0, 0.06), rgba(0, 255, 0, 0.02), rgba(0, 0, 255, 0.06));
             background-size: 100% 2px, 3px 100%;
             pointer-events: none;
-            z-index: 9998; /* 统一 z-index */
+            z-index: 9998;
             opacity: 1;
         }
 
@@ -693,7 +690,7 @@
              background-blend-mode: difference;
              opacity: 0.03;
              pointer-events: none;
-             z-index: 10001; /* 统一 z-index */
+             z-index: 10001;
              filter: contrast(150) brightness(1.2);
          }
 
@@ -1002,7 +999,6 @@
 
     <script>
         window.addEventListener('DOMContentLoaded', () => {
-            // 初始化日志
             function createTransitionLogs() {
                 const container = document.getElementById('curtainLogs');
                 if (!container) return;
@@ -1091,7 +1087,6 @@
                 setTimeout(() => {
                     if (curtain) {
                         curtain.classList.add('active');
-                        // 确保日志也开始生成
                         const curtainLogs = document.getElementById('curtainLogs');
                         if (curtainLogs && curtainLogs.children.length === 0) {
                             createTransitionLogs();

