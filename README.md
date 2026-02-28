@@ -56,7 +56,7 @@ go env -w GOPROXY=https://goproxy.cn,direct
 
 - 默认账户为`Adm1nstr@t0r`，密码为`Pr3c1se5!@#$%`，务必部署后在Settings处修改。
 
-- 本工具隧道部分依赖Chisel，已放在tools目录中，不放心的师傅可以前往[Chisel Github仓库](https://github.com/jpillora/chisel)自行下载
+- 本工具隧道部分依赖Chisel，需要您自行前往[Chisel Github仓库](https://github.com/jpillora/chisel)下载并放到`tools/`目录中
 
 ## 0x04 How to use
 
