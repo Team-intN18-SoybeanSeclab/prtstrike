@@ -1,83 +1,11 @@
-<style>
-    .prts-btn {
-        background: rgba(125, 142, 142, 0.1);
-        border: 1px solid rgba(125, 142, 142, 0.3);
-        color: var(--accent);
-        padding: 8px 16px;
-        font-family: 'JetBrains Mono', monospace;
-        font-size: 11px;
-        cursor: pointer;
-        transition: all 0.2s;
-    }
-    .prts-btn:hover { background: rgba(125, 142, 142, 0.2); border-color: var(--accent); }
-    .prts-input {
-        background: rgba(0,0,0,0.3);
-        border: 1px solid rgba(125,142,142,0.2);
-        color: #fff;
-        padding: 8px 12px;
-        font-family: 'JetBrains Mono', monospace;
-        font-size: 12px;
-        width: 100%;
-    }
-    .prts-input:focus { outline: none; border-color: var(--accent); }
-    .prts-select {
-        background: rgba(0,0,0,0.3);
-        border: 1px solid rgba(125,142,142,0.2);
-        color: #fff;
-        padding: 8px 12px;
-        font-family: 'JetBrains Mono', monospace;
-        font-size: 12px;
-        width: 100%;
-    }
-    .prts-select:focus { outline: none; border-color: var(--accent); }
-    .prts-table { width: 100%; border-collapse: collapse; font-family: 'JetBrains Mono', monospace; font-size: 11px; }
-    .prts-table th { padding: 10px 15px; text-align: left; color: var(--accent); border-bottom: 1px solid rgba(125,142,142,0.2); font-size: 10px; letter-spacing: 1px; }
-    .prts-table td { padding: 10px 15px; border-bottom: 1px solid rgba(255,255,255,0.04); }
-    .action-bar { display: flex; gap: 10px; margin-bottom: 20px; }
-    .modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.85); backdrop-filter: blur(15px); z-index: 2001; align-items: center; justify-content: center; }
-    .modal .modal-content { width: 95%; max-width: 500px; background: #0a0a0a; border: 1px solid var(--accent); padding: 25px; }
-    .close-modal { cursor: pointer; font-size: 20px; color: var(--accent); float: right; }
-    .cmd-box {
-        background: #000;
-        border: 1px solid rgba(125,142,142,0.2);
-        padding: 12px 15px;
-        font-family: 'JetBrains Mono', monospace;
-        font-size: 11px;
-        color: var(--success);
-        word-break: break-all;
-        position: relative;
-        margin-top: 10px;
-        line-height: 1.5;
-    }
-    .copy-btn {
-        position: absolute; top: 6px; right: 6px;
-        background: rgba(125,142,142,0.2);
-        border: 1px solid rgba(125,142,142,0.3);
-        color: var(--accent);
-        padding: 3px 8px;
-        font-family: 'JetBrains Mono', monospace;
-        font-size: 9px;
-        cursor: pointer;
-    }
-    .copy-btn:hover { background: rgba(125,142,142,0.4); }
-    .evasion-tag {
-        display: inline-block;
-        padding: 2px 6px;
-        font-size: 9px;
-        border: 1px solid;
-        margin-right: 4px;
-        margin-bottom: 2px;
-    }
-</style>
-
-<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:15px; flex-wrap:wrap; gap:10px;">
+<div class="module-toolbar-tight">
     <div class="section-header" style="margin-bottom:0;">
         <h3>Chisel Tunnel // Proxy Management</h3>
     </div>
 </div>
 
 <!-- Evasion info banner -->
-<div style="padding:10px 14px; background:rgba(26,26,26,0.6); border:1px solid var(--border); margin-bottom:15px; font-family:'JetBrains Mono'; font-size:10px; display:flex; flex-wrap:wrap; align-items:center; gap:4px;">
+<div class="module-banner">
     <span style="color:var(--accent);">ANTI-DETECTION:</span>
     <span class="evasion-tag" style="color:#2196F3; border-color:#2196F3;">CUSTOM_HEADERS</span>
     <span class="evasion-tag" style="color:#ff9800; border-color:#ff9800;">UNIQUE_AUTH</span>
@@ -94,7 +22,7 @@
     </button>
 </div>
 
-<div class="data-grid" style="overflow-x:auto;">
+<div class="data-grid module-list-scroll">
     <table class="prts-table" style="min-width:700px;">
         <thead>
             <tr>
@@ -121,9 +49,9 @@
 </div>
 
 <!-- Create Modal -->
-<div id="create-proxy-modal" class="modal">
-    <div class="modal-content">
-        <span class="close-modal" onclick="document.getElementById('create-proxy-modal').style.display='none'">&times;</span>
+<div id="create-proxy-modal" class="modal-shell">
+    <div class="modal-panel modal-panel-sm" style="max-width:500px; padding:25px;">
+        <span class="modal-close" onclick="document.getElementById('create-proxy-modal').style.display='none'">&times;</span>
         <h3 style="font-family:'JetBrains Mono'; color:var(--accent); margin-bottom:20px;">>> NEW_CHISEL_TUNNEL</h3>
         <form onsubmit="event.preventDefault(); createProxy();">
             <div style="margin-bottom:12px;">
@@ -158,14 +86,15 @@
 (function() {
     // Cache beacons for table display
     var beaconMap = {};
+    var escapeHtml = window.PRTS.escapeHtml;
 
     window.openCreateProxyModal = async function() {
         document.getElementById('create-proxy-modal').style.display = 'flex';
         const sel = document.getElementById('proxy-client-id');
         sel.innerHTML = '<option value="">-- Select Beacon --</option>';
         try {
-            const resp = await fetch('/api/clients', { headers: { 'X-Requested-With': 'XMLHttpRequest' } });
-            const result = await resp.json();
+            const apiResp = await PRTS.api.get('/api/clients');
+            const result = apiResp.result;
             const clients = result.data || [];
             clients.forEach(function(c) {
                 beaconMap[c.id] = c;
@@ -193,8 +122,8 @@
 
     window.fetchProxies = async function() {
         try {
-            const resp = await fetch('/api/proxies', { headers: { 'X-Requested-With': 'XMLHttpRequest' } });
-            const result = await resp.json();
+            const apiResp = await PRTS.api.get('/api/proxies');
+            const result = apiResp.result;
             const tbody = document.getElementById('proxy-list-body');
             if (!tbody) return;
             const proxies = result.data || [];
@@ -232,9 +161,9 @@
     };
 
     window.showClientCmd = function(proxyId) {
-        fetch('/api/proxies', { headers: { 'X-Requested-With': 'XMLHttpRequest' } })
-            .then(function(r) { return r.json(); })
-            .then(function(result) {
+        PRTS.api.get('/api/proxies')
+            .then(function(apiResp) {
+                const result = apiResp.result;
                 const proxies = result.data || [];
                 const p = proxies.find(function(x) { return x.id === proxyId; });
                 if (!p) return;
@@ -273,10 +202,6 @@
         setTimeout(function() { btn.textContent = 'COPY'; }, 1500);
     };
 
-    function escapeHtml(str) {
-        return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-    }
-
     window.createProxy = async function() {
         const body = {
             type: document.getElementById('proxy-type').value,
@@ -285,12 +210,8 @@
             client_id: document.getElementById('proxy-client-id').value || '',
         };
         try {
-            const resp = await fetch('/api/proxies', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
-                body: JSON.stringify(body)
-            });
-            const result = await resp.json();
+            const apiResp = await PRTS.api.post('/api/proxies', body);
+            const result = apiResp.result;
             if (result.status === 'success') {
                 document.getElementById('create-proxy-modal').style.display = 'none';
                 showNotification('TUNNEL_DEPLOYED: ' + (result.data.proxy ? result.data.proxy.id : ''));
@@ -314,8 +235,8 @@
     window.deleteProxy = async function(id) {
         if (!confirm('TERMINATE this tunnel?')) return;
         try {
-            const resp = await fetch('/api/proxies/' + id, { method: 'DELETE', headers: { 'X-Requested-With': 'XMLHttpRequest' } });
-            const result = await resp.json();
+            const apiResp = await PRTS.api.delete('/api/proxies/' + id);
+            const result = apiResp.result;
             showNotification(result.message);
             fetchProxies();
         } catch(e) { showNotification('ERROR: ' + e.message); }

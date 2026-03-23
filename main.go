@@ -82,6 +82,7 @@ func main() {
 
 			// Task routes
 			auth.GET("/tasks", handleGetTasks)
+			auth.GET("/tasks/:id", handleGetTask)
 			auth.POST("/tasks", handleCreateTask)
 
 			// File routes

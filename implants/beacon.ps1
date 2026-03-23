@@ -157,6 +157,33 @@ function Send-Result {
 
 function Invoke-Screenshot {
     try {
+        if (-not ("PrtStrike.Native" -as [type])) {
+            Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public static class PrtStrikeNative {
+    [DllImport("user32.dll")]
+    public static extern bool SetProcessDPIAware();
+
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool SetProcessDpiAwarenessContext(IntPtr dpiContext);
+
+    [DllImport("shcore.dll")]
+    public static extern int SetProcessDpiAwareness(int awareness);
+}
+"@
+        }
+
+        try {
+            [void][PrtStrikeNative]::SetProcessDpiAwarenessContext([IntPtr](-4))
+        } catch {
+            try {
+                [void][PrtStrikeNative]::SetProcessDpiAwareness(2)
+            } catch {
+                try { [void][PrtStrikeNative]::SetProcessDPIAware() } catch {}
+            }
+        }
+
         Add-Type -AssemblyName System.Drawing
         Add-Type -AssemblyName System.Windows.Forms
 

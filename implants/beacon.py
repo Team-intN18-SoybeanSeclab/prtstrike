@@ -391,17 +391,98 @@ def capture_screenshot():
 
 def _screenshot_windows():
     """Windows screenshot using ctypes and GDI32 - captures all monitors"""
+    ps_cmd = r"""
+if (-not ("PrtStrike.Native" -as [type])) {
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public static class PrtStrikeNative {
+    [DllImport("user32.dll")]
+    public static extern bool SetProcessDPIAware();
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool SetProcessDpiAwarenessContext(IntPtr dpiContext);
+    [DllImport("shcore.dll")]
+    public static extern int SetProcessDpiAwareness(int awareness);
+}
+"@
+}
+try {
+    [void][PrtStrikeNative]::SetProcessDpiAwarenessContext([IntPtr](-4))
+} catch {
+    try {
+        [void][PrtStrikeNative]::SetProcessDpiAwareness(2)
+    } catch {
+        try { [void][PrtStrikeNative]::SetProcessDPIAware() } catch {}
+    }
+}
+Add-Type -AssemblyName System.Drawing
+Add-Type -AssemblyName System.Windows.Forms
+$bounds = [System.Windows.Forms.SystemInformation]::VirtualScreen
+$bmp = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height)
+$graphics = [System.Drawing.Graphics]::FromImage($bmp)
+$graphics.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
+$ms = New-Object System.IO.MemoryStream
+$bmp.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)
+$graphics.Dispose()
+$bmp.Dispose()
+[Convert]::ToBase64String($ms.ToArray())
+$ms.Dispose()
+"""
+    try:
+        proc = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", ps_cmd],
+            capture_output=True, text=True, timeout=30
+        )
+        b64 = (proc.stdout or "").strip()
+        if proc.returncode == 0 and b64:
+            return "SCREENSHOT:" + b64
+    except Exception:
+        pass
+
     import ctypes
     import struct
 
     user32 = ctypes.windll.user32
     gdi32 = ctypes.windll.gdi32
+    shcore = getattr(ctypes.windll, "shcore", None)
+
+    def _enable_dpi_awareness():
+        ptr_bits = ctypes.sizeof(ctypes.c_void_p) * 8
+        per_monitor_v2 = ctypes.c_void_p((1 << ptr_bits) - 4)
+
+        try:
+            if hasattr(user32, "SetProcessDpiAwarenessContext"):
+                user32.SetProcessDpiAwarenessContext.argtypes = [ctypes.c_void_p]
+                user32.SetProcessDpiAwarenessContext.restype = ctypes.c_bool
+                if user32.SetProcessDpiAwarenessContext(per_monitor_v2):
+                    return
+        except Exception:
+            pass
+
+        try:
+            if shcore and hasattr(shcore, "SetProcessDpiAwareness"):
+                shcore.SetProcessDpiAwareness.argtypes = [ctypes.c_int]
+                shcore.SetProcessDpiAwareness.restype = ctypes.c_int
+                hr = shcore.SetProcessDpiAwareness(2)
+                if hr == 0 or hr == -2147024891:
+                    return
+        except Exception:
+            pass
+
+        try:
+            if hasattr(user32, "SetProcessDPIAware"):
+                user32.SetProcessDPIAware()
+        except Exception:
+            pass
+
+    _enable_dpi_awareness()
 
     SM_XVIRTUALSCREEN = 76
     SM_YVIRTUALSCREEN = 77
     SM_CXVIRTUALSCREEN = 78
     SM_CYVIRTUALSCREEN = 79
     SRCCOPY = 0x00CC0020
+    CAPTUREBLT = 0x40000000
     BI_RGB = 0
     DIB_RGB_COLORS = 0
 
@@ -430,7 +511,12 @@ def _screenshot_windows():
         return "Error: failed to create bitmap"
 
     old = gdi32.SelectObject(mem_dc, hbmp)
-    gdi32.BitBlt(mem_dc, 0, 0, width, height, hdc, src_x, src_y, SRCCOPY)
+    if not gdi32.BitBlt(mem_dc, 0, 0, width, height, hdc, src_x, src_y, SRCCOPY | CAPTUREBLT):
+        gdi32.SelectObject(mem_dc, old)
+        gdi32.DeleteObject(hbmp)
+        gdi32.DeleteDC(mem_dc)
+        user32.ReleaseDC(hwnd, hdc)
+        return "Error: BitBlt failed"
 
     bmi_header = struct.pack(
         '<IiiHHIIiiII',

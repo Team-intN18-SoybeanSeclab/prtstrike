@@ -1,4 +1,4 @@
-<div class="section-header" style="display: flex; justify-content: space-between; align-items: center;">
+<div class="section-header module-toolbar-tight">
     <h3>Stager / Payload Generator</h3>
 </div>
 
@@ -80,7 +80,7 @@
     <div class="section-header">
         <h3>Generated Artifacts</h3>
     </div>
-    <div class="list-container" style="overflow-x:auto;">
+    <div class="list-container module-list-scroll">
         <div class="beacons-header-bar" style="grid-template-columns: 0.8fr 1fr 1fr 0.6fr 0.6fr 0.6fr 0.8fr 120px; min-width:700px;">
             <span>ID</span>
             <span>Name</span>
@@ -206,8 +206,8 @@
 
     async function loadListeners() {
         try {
-            const resp = await fetch('/api/listeners', { headers: { 'X-Requested-With': 'XMLHttpRequest' } });
-            const result = await resp.json();
+            const apiResp = await PRTS.api.get('/api/listeners');
+            const result = apiResp.result;
             const sel = document.getElementById('payload-listener');
             if (!sel) return;
             allListeners = (result.status === 'success' && result.data) ? result.data : [];
@@ -226,8 +226,8 @@
 
     async function loadPayloads() {
         try {
-            const resp = await fetch('/api/payloads', { headers: { 'X-Requested-With': 'XMLHttpRequest' } });
-            const result = await resp.json();
+            const apiResp = await PRTS.api.get('/api/payloads');
+            const result = apiResp.result;
             const container = document.getElementById('payloads-list');
             if (!container) return;
             const payloads = result.data || [];
@@ -304,12 +304,8 @@
         }
 
         try {
-            const resp = await fetch('/api/payloads', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
-                body: JSON.stringify(body)
-            });
-            const result = await resp.json();
+            const apiResp = await PRTS.api.post('/api/payloads', body);
+            const result = apiResp.result;
             if (result.status === 'success') {
                 showNotification('ARTIFACT_GENERATED: ' + body.name + ' [' + body.type + '/' + body.os + ']');
                 loadPayloads();
@@ -325,8 +321,8 @@
     window.deletePayload = async function(id) {
         if (!confirm('Delete this payload?')) return;
         try {
-            const resp = await fetch('/api/payloads/' + id, { method: 'DELETE', headers: { 'X-Requested-With': 'XMLHttpRequest' } });
-            const result = await resp.json();
+            const apiResp = await PRTS.api.delete('/api/payloads/' + id);
+            const result = apiResp.result;
             showNotification(result.message);
             loadPayloads();
         } catch(e) { showNotification('ERROR: ' + e.message); }

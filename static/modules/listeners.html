@@ -1,4 +1,4 @@
-<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; flex-wrap: wrap; gap: 10px;">
+<div class="module-toolbar">
     <div class="section-header" style="margin-bottom: 0;">
         <h3>Network Listeners</h3>
     </div>
@@ -7,7 +7,7 @@
     </button>
 </div>
 
-<div class="list-container" style="overflow-x:auto;">
+<div class="list-container module-list-scroll">
     <div class="beacons-header-bar" style="grid-template-columns: 0.6fr 1.2fr 0.8fr 0.6fr 0.8fr 0.7fr 120px; min-width:650px;">
         <span>ID</span>
         <span>Name</span>
@@ -23,19 +23,19 @@
 </div>
 
 <!-- Create Listener Modal -->
-<div id="create-listener-modal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.85); backdrop-filter:blur(15px); z-index:2001; align-items:center; justify-content:center;">
-    <div style="width:95%; max-width:450px; background:#0a0a0a; border:1px solid var(--accent); padding:30px;">
-        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:25px;">
-            <h3 style="font-family:'JetBrains Mono'; letter-spacing:2px; color:var(--accent);">>> NEW_LISTENER</h3>
-            <span style="cursor:pointer; font-size:20px; color:var(--accent);" onclick="document.getElementById('create-listener-modal').style.display='none'">&times;</span>
+<div id="create-listener-modal" class="modal-shell">
+    <div class="modal-panel modal-panel-sm">
+        <div class="modal-header-row">
+            <h3 class="modal-title-mono">>> NEW_LISTENER</h3>
+            <span class="modal-close" onclick="document.getElementById('create-listener-modal').style.display='none'">&times;</span>
         </div>
         <form onsubmit="event.preventDefault(); createListener();">
             <div class="form-group" style="margin-bottom:15px;">
-                <label style="font-family:'JetBrains Mono'; font-size:11px; color:#888; margin-bottom:5px; display:block;">NAME:</label>
+                <label class="form-label-mono">NAME:</label>
                 <input type="text" id="listener-name" class="form-input" placeholder="HTTP_LISTENER_01" required style="width:100%;">
             </div>
             <div class="form-group" style="margin-bottom:15px;">
-                <label style="font-family:'JetBrains Mono'; font-size:11px; color:#888; margin-bottom:5px; display:block;">TYPE:</label>
+                <label class="form-label-mono">TYPE:</label>
                 <select id="listener-type" class="form-input" style="width:100%;">
                     <option value="reverse_http">Reverse HTTP</option>
                     <option value="reverse_https">Reverse HTTPS</option>
@@ -43,11 +43,11 @@
                 </select>
             </div>
             <div class="form-group" style="margin-bottom:15px;">
-                <label style="font-family:'JetBrains Mono'; font-size:11px; color:#888; margin-bottom:5px; display:block;">BIND_IP:</label>
+                <label class="form-label-mono">BIND_IP:</label>
                 <input type="text" id="listener-bind" class="form-input" value="0.0.0.0" required style="width:100%;">
             </div>
             <div class="form-group" style="margin-bottom:20px;">
-                <label style="font-family:'JetBrains Mono'; font-size:11px; color:#888; margin-bottom:5px; display:block;">PORT:</label>
+                <label class="form-label-mono">PORT:</label>
                 <input type="number" id="listener-port" class="form-input" value="8443" required style="width:100%;">
             </div>
             <button type="submit" class="btn-primary" style="width:100%;">CREATE_AND_START</button>
@@ -65,8 +65,8 @@
 
     async function fetchListeners() {
         try {
-            const resp = await fetch('/api/listeners', { headers: { 'X-Requested-With': 'XMLHttpRequest' } });
-            const result = await resp.json();
+            const apiResp = await PRTS.api.get('/api/listeners');
+            const result = apiResp.result;
             if (result.status === 'success') renderListeners(result.data || []);
         } catch(e) { console.error('Fetch listeners error:', e); }
     }
@@ -115,12 +115,8 @@
             port: parseInt(document.getElementById('listener-port').value)
         };
         try {
-            const resp = await fetch('/api/listeners', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
-                body: JSON.stringify(body)
-            });
-            const result = await resp.json();
+            const apiResp = await PRTS.api.post('/api/listeners', body);
+            const result = apiResp.result;
             if (result.status === 'success') {
                 document.getElementById('create-listener-modal').style.display = 'none';
                 showNotification('LISTENER_CREATED: ' + body.name);
@@ -133,8 +129,8 @@
 
     window.startListener = async function(id) {
         try {
-            const resp = await fetch('/api/listeners/' + id + '/start', { method: 'POST', headers: { 'X-Requested-With': 'XMLHttpRequest' } });
-            const result = await resp.json();
+            const apiResp = await PRTS.api.post('/api/listeners/' + id + '/start');
+            const result = apiResp.result;
             showNotification(result.message);
             fetchListeners();
         } catch(e) { showNotification('ERROR: ' + e.message); }
@@ -142,8 +138,8 @@
 
     window.stopListener = async function(id) {
         try {
-            const resp = await fetch('/api/listeners/' + id + '/stop', { method: 'POST', headers: { 'X-Requested-With': 'XMLHttpRequest' } });
-            const result = await resp.json();
+            const apiResp = await PRTS.api.post('/api/listeners/' + id + '/stop');
+            const result = apiResp.result;
             showNotification(result.message);
             fetchListeners();
         } catch(e) { showNotification('ERROR: ' + e.message); }
@@ -152,8 +148,8 @@
     window.deleteListener = async function(id) {
         if (!confirm('DELETE this listener?')) return;
         try {
-            const resp = await fetch('/api/listeners/' + id, { method: 'DELETE', headers: { 'X-Requested-With': 'XMLHttpRequest' } });
-            const result = await resp.json();
+            const apiResp = await PRTS.api.delete('/api/listeners/' + id);
+            const result = apiResp.result;
             showNotification(result.message);
             fetchListeners();
         } catch(e) { showNotification('ERROR: ' + e.message); }

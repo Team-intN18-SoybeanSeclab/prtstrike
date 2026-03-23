@@ -1,8 +1,8 @@
-<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:15px;">
+<div class="module-toolbar-tight">
     <div class="section-header" style="margin-bottom:0;">
         <h3>Network Topology</h3>
     </div>
-    <div style="display:flex; gap:15px; align-items:center;">
+    <div class="module-actions-inline-wide">
         <span style="font-family:'JetBrains Mono';font-size:10px;color:#666;">
             <span id="topo-online" style="color:var(--success);">0</span> online /
             <span id="topo-total" style="color:#888;">0</span> total
@@ -72,11 +72,9 @@
 
     async function fetchAndRender() {
         try {
-            const resp = await fetch('/api/clients', {
-                headers: { 'X-Requested-With': 'XMLHttpRequest' }
-            });
-            if (resp.status === 401) return;
-            const result = await resp.json();
+            const apiResp = await PRTS.api.get('/api/clients');
+            if (apiResp.response.status === 401) return;
+            const result = apiResp.result;
             if (result.status === 'success') renderTopology(result.data || []);
         } catch(e) { console.error('Topology fetch error:', e); }
     }

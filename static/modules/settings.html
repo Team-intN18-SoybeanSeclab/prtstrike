@@ -89,8 +89,8 @@
 (function() {
     async function loadDBStats() {
         try {
-            const resp = await fetch('/api/stats', { headers: { 'X-Requested-With': 'XMLHttpRequest' } });
-            const result = await resp.json();
+            const apiResp = await PRTS.api.get('/api/stats');
+            const result = apiResp.result;
             if (result.status === 'success') {
                 const d = result.data;
                 const el = document.getElementById('db-stats-rows');
@@ -113,8 +113,8 @@
 
     async function loadSettings() {
         try {
-            const resp = await fetch('/api/settings', { headers: { 'X-Requested-With': 'XMLHttpRequest' } });
-            const result = await resp.json();
+            const apiResp = await PRTS.api.get('/api/settings');
+            const result = apiResp.result;
             if (result.status === 'success' && result.data) {
                 const s = result.data;
                 document.getElementById('setting-server-name').value = s.server_name || 'PRTSTRIKE_CORE';
@@ -134,12 +134,8 @@
             debug: document.getElementById('setting-debug').value === 'true'
         };
         try {
-            const resp = await fetch('/api/settings', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
-                body: JSON.stringify(body)
-            });
-            const result = await resp.json();
+            const apiResp = await PRTS.api.post('/api/settings', body);
+            const result = apiResp.result;
             if (result.status === 'success') {
                 showNotification('SETTINGS_SAVED');
                 // Apply theme immediately
@@ -166,12 +162,8 @@
         }
 
         try {
-            const resp = await fetch('/api/change-password', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
-                body: JSON.stringify({ old_password: oldPwd, new_password: newPwd })
-            });
-            const result = await resp.json();
+            const apiResp = await PRTS.api.post('/api/change-password', { old_password: oldPwd, new_password: newPwd });
+            const result = apiResp.result;
             if (result.status === 'success') {
                 showNotification('PASSWORD_CHANGED');
                 document.getElementById('old-password').value = '';

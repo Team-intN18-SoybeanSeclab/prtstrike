@@ -15,11 +15,15 @@ import (
 var (
 	modUser32 = syscall.NewLazyDLL("user32.dll")
 	modGdi32  = syscall.NewLazyDLL("gdi32.dll")
+	modShcore = syscall.NewLazyDLL("shcore.dll")
 
-	procGetDesktopWindow  = modUser32.NewProc("GetDesktopWindow")
-	procGetDC             = modUser32.NewProc("GetDC")
-	procReleaseDC         = modUser32.NewProc("ReleaseDC")
-	procGetSystemMetrics  = modUser32.NewProc("GetSystemMetrics")
+	procGetDesktopWindow             = modUser32.NewProc("GetDesktopWindow")
+	procGetDC                        = modUser32.NewProc("GetDC")
+	procReleaseDC                    = modUser32.NewProc("ReleaseDC")
+	procGetSystemMetrics             = modUser32.NewProc("GetSystemMetrics")
+	procSetProcessDPIAware           = modUser32.NewProc("SetProcessDPIAware")
+	procSetProcessDpiAwarenessCtx    = modUser32.NewProc("SetProcessDpiAwarenessContext")
+	procSetProcessDpiAwarenessShcore = modShcore.NewProc("SetProcessDpiAwareness")
 
 	procCreateCompatibleDC     = modGdi32.NewProc("CreateCompatibleDC")
 	procCreateCompatibleBitmap = modGdi32.NewProc("CreateCompatibleBitmap")
@@ -36,8 +40,13 @@ const (
 	smCXVirtualScreen = 78
 	smCYVirtualScreen = 79
 	srccopy           = 0x00CC0020
+	captureBlt        = 0x40000000
 	biRGB             = 0
 	dibRGBColors      = 0
+
+	processPerMonitorDPIAware       = 2
+	eAccessDenied                   = 0x80070005
+	dpiAwarenessPerMonitorAwareV2   = ^uintptr(3) // -4
 )
 
 type bitmapInfoHeader struct {
@@ -59,7 +68,29 @@ type bitmapInfo struct {
 	Colors [1]uint32
 }
 
+func enableHighDPIAwareness() {
+	if err := procSetProcessDpiAwarenessCtx.Find(); err == nil {
+		ret, _, _ := procSetProcessDpiAwarenessCtx.Call(dpiAwarenessPerMonitorAwareV2)
+		if ret != 0 {
+			return
+		}
+	}
+
+	if err := procSetProcessDpiAwarenessShcore.Find(); err == nil {
+		hr, _, _ := procSetProcessDpiAwarenessShcore.Call(processPerMonitorDPIAware)
+		if hr == 0 || hr == eAccessDenied {
+			return
+		}
+	}
+
+	if err := procSetProcessDPIAware.Find(); err == nil {
+		procSetProcessDPIAware.Call()
+	}
+}
+
 func captureScreenshot() string {
+	enableHighDPIAwareness()
+
 	hwnd, _, _ := procGetDesktopWindow.Call()
 	hdc, _, _ := procGetDC.Call(0) // NULL = entire virtual screen DC
 	if hdc == 0 {
@@ -96,7 +127,7 @@ func captureScreenshot() string {
 	old, _, _ := procSelectObject.Call(memDC, hBitmap)
 
 	// BitBlt from virtual screen origin (may be negative for left-of-primary monitors)
-	ret, _, _ := procBitBlt.Call(memDC, 0, 0, w, h, hdc, uintptr(srcX), uintptr(srcY), srccopy)
+	ret, _, _ := procBitBlt.Call(memDC, 0, 0, w, h, hdc, uintptr(srcX), uintptr(srcY), srccopy|captureBlt)
 	if ret == 0 {
 		procSelectObject.Call(memDC, old)
 		return "Error: BitBlt failed"
@@ -116,7 +147,7 @@ func captureScreenshot() string {
 
 	pixels := make([]byte, width*height*4)
 	r, _, _ := procGetDIBits.Call(
-		hdc, hBitmap, 0, uintptr(height),
+		memDC, hBitmap, 0, uintptr(height),
 		uintptr(unsafe.Pointer(&pixels[0])),
 		uintptr(unsafe.Pointer(&bmi)),
 		dibRGBColors,

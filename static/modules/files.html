@@ -1,4 +1,4 @@
-<div class="section-header" style="display: flex; justify-content: space-between; align-items: center; flex-wrap:wrap; gap:10px;">
+<div class="section-header module-toolbar-tight">
     <h3>Remote File Browser</h3>
     <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
         <select class="form-input" id="rfm-client" style="width:240px; height:32px; font-size:11px;" onchange="rfmOnClientChange()">
@@ -76,6 +76,8 @@
 (function() {
     let currentClientId = '';
     let currentPath = '.';
+    const escapeHtml = window.PRTS.escapeHtml;
+    const fileListColumns = 'grid-template-columns: 40px 1fr 100px 140px 80px; padding:8px 20px; min-width:500px;';
 
     function formatSize(bytes) {
         if (!bytes || bytes === 0) return '-';
@@ -88,6 +90,119 @@
     function formatTime(t) {
         if (!t) return '-';
         return new Date(t).toLocaleString();
+    }
+
+    function getCurrentSeparator(path) {
+        return path.includes('\\') ? '\\' : '/';
+    }
+
+    function joinPath(basePath, name) {
+        const sep = getCurrentSeparator(basePath);
+        let fullPath = basePath || '.';
+        if (!fullPath.endsWith(sep) && !fullPath.endsWith('/')) fullPath += sep;
+        return fullPath + name;
+    }
+
+    function getParentPath(path) {
+        if (!path || path === '__DRIVES__') return '__DRIVES__';
+
+        let parent = path;
+        const sep = getCurrentSeparator(parent);
+        if (parent.endsWith(sep) && parent.length > 1) parent = parent.slice(0, -1);
+
+        if (/^[A-Za-z]:$/.test(parent) || /^[A-Za-z]:\\$/.test(parent)) {
+            return '__DRIVES__';
+        }
+        if (parent === '/') {
+            return '/';
+        }
+
+        const lastSep = parent.lastIndexOf(sep);
+        if (lastSep > 0) {
+            parent = parent.substring(0, lastSep);
+            if (/^[A-Za-z]:$/.test(parent)) parent += '\\';
+            return parent;
+        }
+        if (lastSep === 0) {
+            return '/';
+        }
+        return '.';
+    }
+
+    function toInlinePath(path) {
+        return String(path == null ? '' : path)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/\\/g, '\\\\')
+            .replace(/'/g, "\\'");
+    }
+
+    function setListMessage(html) {
+        const container = document.getElementById('rfm-file-list');
+        if (container) container.innerHTML = html;
+    }
+
+    function setStatusIndicator(label, color) {
+        const statusEl = document.getElementById('rfm-status');
+        if (!statusEl) return;
+        statusEl.textContent = label;
+        statusEl.style.color = color;
+    }
+
+    function toggleTargetState(hasTarget) {
+        const toolbar = document.getElementById('rfm-toolbar');
+        const listWrapper = document.getElementById('rfm-list-wrapper');
+        const placeholder = document.getElementById('rfm-placeholder');
+        if (!toolbar || !listWrapper || !placeholder) return;
+        toolbar.style.display = hasTarget ? 'flex' : 'none';
+        listWrapper.style.display = hasTarget ? 'block' : 'none';
+        placeholder.style.display = hasTarget ? 'none' : 'flex';
+    }
+
+    function ensureProgressArea() {
+        const progressArea = document.getElementById('rfm-progress');
+        if (progressArea) progressArea.style.display = 'block';
+        return progressArea;
+    }
+
+    function createProgressCard(prefix, iconClass, label, statusText, barColor, metaText) {
+        const progressArea = ensureProgressArea();
+        const progId = prefix + '_' + Date.now();
+        const progEl = document.createElement('div');
+        progEl.className = 'module-progress-card';
+        progEl.innerHTML =
+            '<div class="module-progress-head">' +
+                '<span class="module-progress-title"><i class="fas ' + iconClass + '" style="margin-right:6px;"></i>' + escapeHtml(label) + '</span>' +
+                '<span class="module-progress-status" id="' + progId + '-status">' + statusText + '</span>' +
+            '</div>' +
+            '<div class="module-progress-bar-wrap"><div id="' + progId + '-bar" class="module-progress-bar" style="background:' + barColor + '; box-shadow:0 0 8px ' + barColor + ';"></div></div>' +
+            (metaText ? '<div class="module-progress-meta">' + metaText + '</div>' : '');
+        if (progressArea) progressArea.appendChild(progEl);
+        return {
+            root: progEl,
+            statusEl: document.getElementById(progId + '-status'),
+            barEl: document.getElementById(progId + '-bar')
+        };
+    }
+
+    function removeProgressCard(card, delayMs) {
+        setTimeout(function() {
+            if (card && card.root && card.root.parentNode) {
+                card.root.parentNode.removeChild(card.root);
+            }
+        }, delayMs || 0);
+    }
+
+    function renderActionCell(item, safePath) {
+        let html = '<span style="text-align:right; display:flex; gap:10px; justify-content:flex-end; font-size:11px;">';
+        if (!item.is_dir) {
+            html += '<span style="color:var(--accent); cursor:pointer;" onclick="rfmDownloadFile(\'' + safePath + '\',' + (item.size || 0) + ')" title="Download"><i class="fas fa-download"></i></span>';
+        }
+        html += '<span style="color:#ff3b30; cursor:pointer;" onclick="rfmDeleteItem(\'' + safePath + '\')" title="Delete"><i class="fas fa-trash"></i></span>';
+        html += '</span>';
+        return html;
     }
 
     function getFileIcon(name, isDir) {
@@ -118,8 +233,8 @@
     // Load online clients
     async function loadClients() {
         try {
-            const resp = await fetch('/api/clients', { headers: { 'X-Requested-With': 'XMLHttpRequest' } });
-            const result = await resp.json();
+            const apiResp = await PRTS.api.get('/api/clients');
+            const result = apiResp.result;
             const sel = document.getElementById('rfm-client');
             if (!sel || !result.data) return;
             const clients = result.data;
@@ -136,28 +251,17 @@
     window.rfmOnClientChange = function() {
         const sel = document.getElementById('rfm-client');
         currentClientId = sel.value;
-        const statusEl = document.getElementById('rfm-status');
-        const toolbar = document.getElementById('rfm-toolbar');
-        const listWrapper = document.getElementById('rfm-list-wrapper');
-        const placeholder = document.getElementById('rfm-placeholder');
 
         if (!currentClientId) {
-            statusEl.textContent = 'NO_TARGET';
-            statusEl.style.color = '#666';
-            toolbar.style.display = 'none';
-            listWrapper.style.display = 'none';
-            placeholder.style.display = 'flex';
+            setStatusIndicator('NO_TARGET', '#666');
+            toggleTargetState(false);
             return;
         }
 
         const opt = sel.selectedOptions[0];
         const isOnline = opt && opt.getAttribute('data-status') === 'online';
-        statusEl.textContent = isOnline ? 'TARGET_ONLINE' : 'TARGET_OFFLINE';
-        statusEl.style.color = isOnline ? '#4caf50' : '#ff3b30';
-
-        toolbar.style.display = 'flex';
-        listWrapper.style.display = 'block';
-        placeholder.style.display = 'none';
+        setStatusIndicator(isOnline ? 'TARGET_ONLINE' : 'TARGET_OFFLINE', isOnline ? '#4caf50' : '#ff3b30');
+        toggleTargetState(true);
 
         currentPath = '.';
         rfmNavigate(currentPath);
@@ -168,25 +272,17 @@
         if (input) input.value = path;
     }
 
-    // Detect if path is a Windows drive root like "C:\" or "__DRIVES__"
-    function isWindowsDriveRoot(p) {
-        return /^[A-Za-z]:\\?$/.test(p);
-    }
-
     window.rfmNavigate = async function(path) {
         if (!currentClientId) return;
         currentPath = path || '.';
 
-        const container = document.getElementById('rfm-file-list');
-        container.innerHTML = '<div style="padding:30px; text-align:center; opacity:0.5; font-family:\'JetBrains Mono\'; font-size:11px;"><i class="fas fa-spinner fa-spin" style="margin-right:8px;"></i>QUERYING_TARGET...</div>';
+        setListMessage('<div style="padding:30px; text-align:center; opacity:0.5; font-family:\'JetBrains Mono\'; font-size:11px;"><i class="fas fa-spinner fa-spin" style="margin-right:8px;"></i>QUERYING_TARGET...</div>');
 
         try {
-            const resp = await fetch('/api/rfm/list?client_id=' + encodeURIComponent(currentClientId) + '&path=' + encodeURIComponent(currentPath), {
-                headers: { 'X-Requested-With': 'XMLHttpRequest' }
-            });
-            const result = await resp.json();
+            const apiResp = await PRTS.api.get(PRTS.apiUrl('/api/rfm/list', { client_id: currentClientId, path: currentPath }));
+            const result = apiResp.result;
             if (result.status !== 'success') {
-                container.innerHTML = '<div style="padding:30px; text-align:center; color:#ff3b30; font-family:\'JetBrains Mono\'; font-size:11px;">ERROR: ' + (result.message || 'unknown') + '</div>';
+                setListMessage('<div style="padding:30px; text-align:center; color:#ff3b30; font-family:\'JetBrains Mono\'; font-size:11px;">ERROR: ' + (result.message || 'unknown') + '</div>');
                 return;
             }
 
@@ -199,41 +295,13 @@
                 renderFileList(result.data.items || []);
             }
         } catch(e) {
-            container.innerHTML = '<div style="padding:30px; text-align:center; color:#ff3b30; font-family:\'JetBrains Mono\'; font-size:11px;">ERROR: ' + e.message + '</div>';
+            setListMessage('<div style="padding:30px; text-align:center; color:#ff3b30; font-family:\'JetBrains Mono\'; font-size:11px;">ERROR: ' + e.message + '</div>');
         }
     };
 
     window.rfmGoUp = function() {
-        // If at drives list, do nothing
         if (currentPath === '__DRIVES__') return;
-
-        let parent = currentPath;
-        const sep = currentPath.includes('\\') ? '\\' : '/';
-
-        // Remove trailing separator
-        if (parent.endsWith(sep) && parent.length > 1) parent = parent.slice(0, -1);
-
-        // Check if at drive root (like "C:" or "C:\")
-        if (/^[A-Za-z]:$/.test(parent) || /^[A-Za-z]:\\$/.test(parent)) {
-            // Go to drives list
-            rfmNavigate('__DRIVES__');
-            return;
-        }
-
-        // Check if at Unix root
-        if (parent === '/') return;
-
-        const lastSep = parent.lastIndexOf(sep);
-        if (lastSep > 0) {
-            parent = parent.substring(0, lastSep);
-            // If we chopped down to just "C:", add backslash for Windows
-            if (/^[A-Za-z]:$/.test(parent)) parent += '\\';
-        } else if (lastSep === 0) {
-            parent = '/';
-        } else {
-            parent = '.';
-        }
-        rfmNavigate(parent);
+        rfmNavigate(getParentPath(currentPath));
     };
 
     window.rfmGoToDrives = function() {
@@ -251,23 +319,19 @@
         rfmNavigate(currentPath);
     };
 
-    function escapeHtml(s) {
-        return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-    }
-
     function renderDriveList(items) {
         const container = document.getElementById('rfm-file-list');
         if (!container) return;
 
         if (items.length === 0) {
-            container.innerHTML = '<div style="padding:30px; text-align:center; opacity:0.3; font-family:\'JetBrains Mono\';">NO_DRIVES_FOUND</div>';
+            container.innerHTML = '<div class="module-empty-state">NO_DRIVES_FOUND</div>';
             return;
         }
 
         container.innerHTML = items.map(item => {
             const drivePath = item.name + '\\';
-            const safePath = escapeHtml(drivePath).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
-            return '<div class="beacon-row" style="grid-template-columns: 40px 1fr 100px 140px 80px; padding:8px 20px; min-width:500px;">' +
+            const safePath = toInlinePath(drivePath);
+            return '<div class="beacon-row" style="' + fileListColumns + '">' +
                 '<span><i class="fas fa-hdd" style="color:var(--accent);"></i></span>' +
                 '<span onclick="rfmNavigate(\'' + safePath + '\')" style="cursor:pointer; color:var(--accent); font-family:\'JetBrains Mono\'; font-size:13px; font-weight:bold;">' + escapeHtml(item.name) + ':\\</span>' +
                 '<span style="font-size:11px; color:#888; font-family:\'JetBrains Mono\';">Drive</span>' +
@@ -282,11 +346,10 @@
         if (!container) return;
 
         if (items.length === 0) {
-            container.innerHTML = '<div style="padding:30px; text-align:center; opacity:0.3; font-family:\'JetBrains Mono\';">EMPTY_DIRECTORY</div>';
+            container.innerHTML = '<div class="module-empty-state">EMPTY_DIRECTORY</div>';
             return;
         }
 
-        // Sort: dirs first, then by name
         items.sort((a, b) => {
             if (a.is_dir && !b.is_dir) return -1;
             if (!a.is_dir && b.is_dir) return 1;
@@ -295,25 +358,19 @@
 
         container.innerHTML = items.map(item => {
             const icon = getFileIcon(item.name, item.is_dir);
-            const sep = currentPath.includes('\\') ? '\\' : '/';
-            let fullPath = currentPath;
-            if (!fullPath.endsWith(sep) && !fullPath.endsWith('/')) fullPath += sep;
-            fullPath += item.name;
-            const safePath = escapeHtml(fullPath).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+            const fullPath = joinPath(currentPath, item.name);
+            const safePath = toInlinePath(fullPath);
 
             const nameClick = item.is_dir
                 ? 'onclick="rfmNavigate(\'' + safePath + '\')" style="cursor:pointer; color:var(--accent);"'
                 : 'style="color:var(--text-main);"';
 
-            return '<div class="beacon-row" style="grid-template-columns: 40px 1fr 100px 140px 80px; padding:8px 20px; min-width:500px;">' +
+            return '<div class="beacon-row" style="' + fileListColumns + '">' +
                 '<span><i class="fas ' + icon + '"></i></span>' +
                 '<span ' + nameClick + '>' + escapeHtml(item.name) + '</span>' +
                 '<span style="font-size:11px; color:#888; font-family:\'JetBrains Mono\';">' + (item.is_dir ? '-' : formatSize(item.size)) + '</span>' +
                 '<span style="font-size:10px; color:#666;">' + formatTime(item.mod_time) + '</span>' +
-                '<span style="text-align:right; display:flex; gap:10px; justify-content:flex-end; font-size:11px;">' +
-                    (!item.is_dir ? '<span style="color:var(--accent); cursor:pointer;" onclick="rfmDownloadFile(\'' + safePath + '\')" title="Download"><i class="fas fa-download"></i></span>' : '') +
-                    '<span style="color:#ff3b30; cursor:pointer;" onclick="rfmDeleteItem(\'' + safePath + '\')" title="Delete"><i class="fas fa-trash"></i></span>' +
-                '</span>' +
+                renderActionCell(item, safePath) +
             '</div>';
         }).join('');
     }
@@ -328,19 +385,11 @@
     window.rfmCreateDir = async function() {
         const name = document.getElementById('rfm-mkdir-name').value.trim();
         if (!name || !currentClientId) return;
-
-        const sep = currentPath.includes('\\') ? '\\' : '/';
-        let newPath = currentPath;
-        if (!newPath.endsWith(sep) && !newPath.endsWith('/')) newPath += sep;
-        newPath += name;
+        const newPath = joinPath(currentPath, name);
 
         try {
-            const resp = await fetch('/api/rfm/mkdir', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
-                body: JSON.stringify({ client_id: currentClientId, path: newPath })
-            });
-            const result = await resp.json();
+            const apiResp = await PRTS.api.post('/api/rfm/mkdir', { client_id: currentClientId, path: newPath });
+            const result = apiResp.result;
             if (result.status === 'success') {
                 showNotification('DIRECTORY_CREATED: ' + name);
             } else {
@@ -355,43 +404,26 @@
     window.rfmDeleteItem = async function(path) {
         if (!confirm('Delete on remote target: ' + path + '?')) return;
         try {
-            const resp = await fetch('/api/rfm/delete', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
-                body: JSON.stringify({ client_id: currentClientId, path: path })
-            });
-            const result = await resp.json();
+            const apiResp = await PRTS.api.post('/api/rfm/delete', { client_id: currentClientId, path: path });
+            const result = apiResp.result;
             showNotification(result.status === 'success' ? 'DELETED' : ('ERROR: ' + result.message));
             rfmRefresh();
         } catch(e) { showNotification('ERROR: ' + e.message); }
     };
 
     // --- Download ---
-    window.rfmDownloadFile = async function(path) {
-        const progressArea = document.getElementById('rfm-progress');
-        progressArea.style.display = 'block';
+    window.rfmDownloadFile = async function(path, sizeBytes = 0) {
         const fileName = path.split(/[/\\]/).pop();
-
-        const progId = 'rdl_' + Date.now();
-        const progEl = document.createElement('div');
-        progEl.style.cssText = 'padding:10px 14px; background:rgba(26,26,26,0.6); border:1px solid var(--border); margin-bottom:8px;';
-        progEl.innerHTML =
-            '<div style="display:flex; justify-content:space-between; margin-bottom:6px;">' +
-                '<span style="font-family:\'JetBrains Mono\'; font-size:11px; color:var(--accent);"><i class="fas fa-cloud-download-alt" style="margin-right:6px;"></i>' + escapeHtml(fileName) + '</span>' +
-                '<span style="font-family:\'JetBrains Mono\'; font-size:10px; color:#888;" id="' + progId + '-status">FETCHING_FROM_TARGET...</span>' +
-            '</div>' +
-            '<div style="height:3px; background:rgba(255,255,255,0.05);"><div id="' + progId + '-bar" style="height:100%; width:0%; background:#2196F3; box-shadow:0 0 8px #2196F3; transition:width 0.3s;"></div></div>';
-        progressArea.appendChild(progEl);
+        const progressCard = createProgressCard('rdl', 'fa-cloud-download-alt', fileName, 'FETCHING_FROM_TARGET...', '#2196F3');
 
         try {
-            const statusEl = document.getElementById(progId + '-status');
-            const barEl = document.getElementById(progId + '-bar');
+            const statusEl = progressCard.statusEl;
+            const barEl = progressCard.barEl;
             barEl.style.width = '30%';
 
-            const resp = await fetch('/api/rfm/download?client_id=' + encodeURIComponent(currentClientId) + '&path=' + encodeURIComponent(path), {
-                headers: { 'X-Requested-With': 'XMLHttpRequest' }
-            });
-            const result = await resp.json();
+            const requestUrl = PRTS.apiUrl('/api/rfm/download', { client_id: currentClientId, path: path, size: sizeBytes > 0 ? sizeBytes : '' });
+            const apiResp = await PRTS.api.get(requestUrl);
+            const result = apiResp.result;
 
             if (result.status !== 'success') {
                 throw new Error(result.message || 'download failed');
@@ -405,24 +437,24 @@
             const bytes = new Uint8Array(raw.length);
             for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
             const blob = new Blob([bytes]);
-            const url = URL.createObjectURL(blob);
+            const blobUrl = URL.createObjectURL(blob);
             const a = document.createElement('a');
-            a.href = url;
+            a.href = blobUrl;
             a.download = fileName;
             document.body.appendChild(a);
             a.click();
             document.body.removeChild(a);
-            URL.revokeObjectURL(url);
+            URL.revokeObjectURL(blobUrl);
 
             barEl.style.width = '100%';
             barEl.style.background = 'var(--success)';
             statusEl.textContent = 'COMPLETE (' + formatSize(result.data.size) + ')';
             statusEl.style.color = 'var(--success)';
             showNotification('DOWNLOAD_COMPLETE: ' + fileName);
-            setTimeout(() => { if (progEl.parentNode) progEl.parentNode.removeChild(progEl); }, 4000);
+            removeProgressCard(progressCard, 4000);
 
         } catch(e) {
-            const statusEl = document.getElementById(progId + '-status');
+            const statusEl = progressCard.statusEl;
             if (statusEl) { statusEl.textContent = 'FAILED: ' + e.message; statusEl.style.color = '#ff3b30'; }
             showNotification('DOWNLOAD_FAILED: ' + e.message);
         }
@@ -431,38 +463,26 @@
     // --- Upload ---
     window.rfmUploadFiles = async function(files) {
         if (!files || files.length === 0 || !currentClientId) return;
-        const progressArea = document.getElementById('rfm-progress');
-        progressArea.style.display = 'block';
 
         for (const file of files) {
-            await rfmUploadSingle(file, progressArea);
+            await rfmUploadSingle(file);
         }
 
         document.getElementById('rfm-upload-input').value = '';
         rfmRefresh();
     };
 
-    async function rfmUploadSingle(file, progressArea) {
+    async function rfmUploadSingle(file) {
         if (file.size > 50 * 1024 * 1024) {
             showNotification('ERROR: File too large (>50MB): ' + file.name);
             return;
         }
 
-        const progId = 'rup_' + Date.now();
-        const progEl = document.createElement('div');
-        progEl.style.cssText = 'padding:10px 14px; background:rgba(26,26,26,0.6); border:1px solid var(--border); margin-bottom:8px;';
-        progEl.innerHTML =
-            '<div style="display:flex; justify-content:space-between; margin-bottom:6px;">' +
-                '<span style="font-family:\'JetBrains Mono\'; font-size:11px; color:var(--accent);"><i class="fas fa-cloud-upload-alt" style="margin-right:6px;"></i>' + escapeHtml(file.name) + '</span>' +
-                '<span style="font-family:\'JetBrains Mono\'; font-size:10px; color:#888;" id="' + progId + '-status">ENCODING...</span>' +
-            '</div>' +
-            '<div style="height:3px; background:rgba(255,255,255,0.05);"><div id="' + progId + '-bar" style="height:100%; width:0%; background:var(--accent); box-shadow:0 0 8px var(--accent); transition:width 0.3s;"></div></div>' +
-            '<div style="margin-top:4px; font-family:\'JetBrains Mono\'; font-size:9px; color:#555;">' + formatSize(file.size) + '</div>';
-        progressArea.appendChild(progEl);
+        const progressCard = createProgressCard('rup', 'fa-cloud-upload-alt', file.name, 'ENCODING...', 'var(--accent)', formatSize(file.size));
 
         try {
-            const statusEl = document.getElementById(progId + '-status');
-            const barEl = document.getElementById(progId + '-bar');
+            const statusEl = progressCard.statusEl;
+            const barEl = progressCard.barEl;
 
             const b64 = await new Promise((resolve, reject) => {
                 const reader = new FileReader();
@@ -474,17 +494,10 @@
             barEl.style.width = '40%';
             statusEl.textContent = 'UPLOADING_TO_TARGET...';
 
-            const sep = currentPath.includes('\\') ? '\\' : '/';
-            let destPath = currentPath;
-            if (!destPath.endsWith(sep) && !destPath.endsWith('/')) destPath += sep;
-            destPath += file.name;
+            const destPath = joinPath(currentPath, file.name);
 
-            const resp = await fetch('/api/rfm/upload', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
-                body: JSON.stringify({ client_id: currentClientId, path: destPath, data: b64 })
-            });
-            const result = await resp.json();
+            const apiResp = await PRTS.api.post('/api/rfm/upload', { client_id: currentClientId, path: destPath, data: b64 });
+            const result = apiResp.result;
 
             if (result.status !== 'success') throw new Error(result.message);
 
@@ -493,10 +506,10 @@
             statusEl.textContent = 'COMPLETE';
             statusEl.style.color = 'var(--success)';
             showNotification('UPLOAD_COMPLETE: ' + file.name);
-            setTimeout(() => { if (progEl.parentNode) progEl.parentNode.removeChild(progEl); }, 4000);
+            removeProgressCard(progressCard, 4000);
 
         } catch(e) {
-            const statusEl = document.getElementById(progId + '-status');
+            const statusEl = progressCard.statusEl;
             if (statusEl) { statusEl.textContent = 'FAILED: ' + e.message; statusEl.style.color = '#ff3b30'; }
             showNotification('UPLOAD_FAILED: ' + e.message);
         }

