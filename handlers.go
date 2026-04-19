@@ -1524,6 +1524,7 @@ func buildGoImplant(dstFile, targetOS, targetArch, c2URL, beaconID string, sleep
 
 	cmd := exec.Command("go", "build",
 		"-trimpath",
+		"-buildvcs=false",
 		"-ldflags", ldflags,
 		"-o", absDst, ".")
 	cmd.Dir = srcDir
