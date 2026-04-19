@@ -65,6 +65,8 @@
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
     <link rel="stylesheet" href="/static/css/module-common.css">
     <script src="/static/js/app-common.js"></script>
+    <!-- Monaco Editor -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.45.0/min/vs/loader.min.js"></script>
     <style>
         :root {
             --bg: #0a0a0a;
@@ -503,6 +505,12 @@
             overflow-y: auto;
             min-height: 0;
             padding-bottom: 15px;
+        }
+
+        /* Files module: no padding/scroll on the container so it can own its layout */
+        .main-content.has-files-module {
+            overflow: hidden;
+            padding-bottom: 0;
         }
 
         .char-reveal-legacy {
@@ -1278,6 +1286,14 @@
             flex-direction: column;
             overflow: visible;
             gap: 25px;
+        }
+
+        /* Files module needs to fill all available height without inner scroll conflicts */
+        #page-files.content-page.active {
+            height: 100%;
+            min-height: 0;
+            overflow: hidden;
+            gap: 0;
         }
 
         /* Welcome Page */
@@ -2127,6 +2143,14 @@
                 scripts.forEach(code => {
                     try { new Function(code)(); } catch(e) { console.error('Module script error:', e); }
                 });
+
+                // Files module needs special layout to fill the available space
+                const mc = document.getElementById('module-container');
+                if (moduleName === 'files') {
+                    mc.classList.add('has-files-module');
+                } else {
+                    mc.classList.remove('has-files-module');
+                }
 
                 if (moduleName === 'beacons') {
                     renderClients();

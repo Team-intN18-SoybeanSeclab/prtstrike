@@ -1,4 +1,4 @@
-# PRTSTRIKE - Light Small Quick
+# PRTSTRIKE — Light · Small · Quick
 
 ![Go Version](https://img.shields.io/badge/Go-1.25.5-00ADD8?style=for-the-badge&logo=go)
 ![HTML5](https://img.shields.io/badge/html5-%23E34F26.svg?style=for-the-badge&logo=html5&logoColor=white)
@@ -6,73 +6,94 @@
 ![CSS3](https://img.shields.io/badge/css3-%231572B6.svg?style=for-the-badge&logo=css3&logoColor=white)
 ![Apache License 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg?style=for-the-badge)
 
-
-***Note：请务必完整看完此README.md再使用本工具。***
+> **Note：请务必完整看完此 README 再使用本工具。**
 
 ![](./readme/demo.gif)
 
+---
+
 ## 0x01 Introduction
 
-PRTSTRIKE，一个轻便、小巧、快捷的轻量化C&C框架，由**Go**编写，最快可**1分钟**部署完成。Build后大小仅**30MB**。
+PRTSTRIKE 是一个轻便、小巧、快捷的轻量化 C&C 框架，由 **Go** 编写，最快可 **1 分钟**部署完成。
+
+| 指标 | 数值 |
+|------|------|
+| C2 Server 编译大小 | ~30 MB |
+| Implant 编译大小 (Windows x64) | ~3 MB |
+| 支持平台 | Windows / Linux / macOS |
+| 通信协议 | HTTP / TCP |
+
+---
 
 ## 0x02 Quick Start
 
-部署命令：
-```Bash
+### 方式一：源码运行
+
+```bash
 git clone https://github.com/Team-intN18-SoybeanSeclab/prtstrike.git
-
 cd prtstrike
-
 go run .
 ```
 
-目前，本工具支持如下功能：
-1. 隧道
-2. 拓扑图
-3. 屏幕截图
-4. 文件浏览器
-5. 生成各种形式的Payloads
-   - EXE
-   - ELF
-   - BIN
-   - RAW
-   - Shellcode
-6. 回连过滤
-   - 过滤开机时间小于30m的机器
-   - 过滤黑/白名单IP的机器
-   - 过滤CPU内存小于2H2G的机器
+### 方式二：Docker 部署
 
-## 0x03 Precautions
-
-- 当您首次使用本工具时，您需要运行如下命令换源:
-```Bash
-go env -w GO111MODULE=on
-go env -w GOPROXY=https://goproxy.cn,direct
+```bash
+docker build -t prtstrike .
+docker run -d -p 8083:8083 --name prts prtstrike
 ```
 
-- 在使用本工具前，您只需下载[Golang](https://golang.google.cn/)作为运行环境
+---
 
-- 默认端口为**8083**，您可以在**main.go**中修改。
+## 0x03 Features
 
-- 默认账户为`Adm1nstr@t0r`，密码为`Pr3c1se5!@#$%`，务必部署后在Settings处修改。
+1. **多协议通信** — HTTP / TCP 双通道
+2. **拓扑图** — 可视化网络拓扑
+3. **屏幕截图** — 远程截屏（BMP 编码，体积更小）
+4. **文件浏览器** — 本地 + 远程文件管理（分块上传 / Range 下载）
+5. **Payload 生成** — 多种格式一键生成
+   - EXE / ELF（Go 编译）
+   - PowerShell / Python / Bash 脚本
+   - BIN / RAW（原始 PE 字节）
+   - Shellcode 源码（C / C# / Go RunPE Loader）
+6. **回连过滤**
+   - 黑/白名单 IP / CIDR 过滤
+   - 沙箱检测（开机时间、硬件规格、分析工具进程）
+---
 
-- 本工具隧道部分依赖Chisel，需要您自行前往[Chisel Github仓库](https://github.com/jpillora/chisel)下载并放到`tools/`目录中
+## 0x04 Precautions
 
-## 0x04 How to use
+- 首次使用时，建议配置 Go 代理：
+  ```bash
+  go env -w GO111MODULE=on
+  go env -w GOPROXY=https://goproxy.cn,direct
+  ```
 
-1. 使用命令`go run .`启动本工具
-2. 访问`http://[IP]:8083`
-3. 使用默认账户`Adm1nstr@t0r`和密码`Pr3c1se5!@#$%`登录
-4. 登录成功后，点击**LISTENER**并添加一个监听
-![](./readme/step4.png)
-5. 添加成功后，点击**PAYLOADS**生成一个木马
-![](./readme/step5.png)
-6. 生成成功后，即可使用。
-7. 若你是内网穿透，请将监听的IP和端口填写为内网IP和端口，PAYLOADS处填写内网穿透的IP和端口
-8. 在TYPOLOGY处，可以查看拓扑图
-![](./readme/step8.png)
+- 运行环境仅需 [Golang](https://golang.google.cn/)（Docker 方式无需本地安装）
 
-## 0x05 Disclaimer
+- 默认端口为 **8083**，可在 `main.go` 中修改
+
+- 默认账户 `Adm1nstr@t0r`，密码 `Pr3c1se5!@#$%`，**务必部署后在 Settings 处修改**
+
+- 隧道功能依赖 [Chisel](https://github.com/jpillora/chisel)，需下载二进制放入 `tools/` 目录
+
+---
+
+## 0x05 How to Use
+
+1. 启动：`go run .`
+2. 访问：`http://[IP]:8083`
+3. 登录：使用默认账户 `Adm1nstr@t0r` / `Pr3c1se5!@#$%`
+4. 添加监听：点击 **LISTENER** → 新建
+   ![](./readme/step4.png)
+5. 生成木马：点击 **PAYLOADS** → 选择类型生成
+   ![](./readme/step5.png)
+6. 内网穿透：监听填内网 IP:Port，Payload 填穿透公网 IP:Port
+7. 查看拓扑：在 **TYPOLOGY** 页面查看
+   ![](./readme/step8.png)
+
+---
+
+## 0x06 Disclaimer
 
 1. 您的下载、安装、使用或修改本工具及相关代码，意味着您对本工具的信任。
 2. 本工具在使用过程中可能对您或他人造成损失或伤害，若发生此类情况，我们不承担任何责任。

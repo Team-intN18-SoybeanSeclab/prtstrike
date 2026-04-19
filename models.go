@@ -13,7 +13,9 @@ import (
 	"gorm.io/gorm"
 )
 
-// --- Structs ---
+// ══════════════════════════════════════════════════════════
+//  Data Models
+// ══════════════════════════════════════════════════════════
 
 type User struct {
 	ID       uint   `gorm:"primaryKey" json:"id"`
@@ -142,7 +144,9 @@ type UploadSession struct {
 	CreatedAt   time.Time
 }
 
-// --- Global Variables ---
+// ══════════════════════════════════════════════════════════
+//  Global Variables
+// ══════════════════════════════════════════════════════════
 
 var (
 	db *gorm.DB

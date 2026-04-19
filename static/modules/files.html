@@ -1,74 +1,109 @@
-<div class="section-header module-toolbar-tight">
-    <h3>Remote File Browser</h3>
-    <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
-        <select class="form-input" id="rfm-client" style="width:240px; height:32px; font-size:11px;" onchange="rfmOnClientChange()">
-            <option value="">SELECT_TARGET...</option>
-        </select>
-        <span id="rfm-status" style="font-family:'JetBrains Mono'; font-size:10px; color:#666;">NO_TARGET</span>
-    </div>
-</div>
-
-<!-- Toolbar -->
-<div id="rfm-toolbar" style="display:none; gap:10px; align-items:center; margin-bottom:15px; flex-wrap:wrap;">
-    <div style="flex:1; display:flex; align-items:center; gap:8px;">
-        <button class="btn-primary" style="padding:6px 12px; font-size:11px;" onclick="rfmGoUp()" title="Up">
-            <i class="fas fa-level-up-alt"></i>
-        </button>
-        <button class="btn-primary" style="padding:6px 12px; font-size:11px;" onclick="rfmGoToDrives()" title="Drives / Root">
-            <i class="fas fa-hdd"></i>
-        </button>
-        <input type="text" class="form-input" id="rfm-path-input" placeholder="Enter path..." style="flex:1; height:30px; font-size:11px; font-family:'JetBrains Mono',monospace; color:var(--accent);" onkeydown="if(event.key==='Enter')rfmGoToPath()">
-        <button class="btn-primary" style="padding:6px 12px; font-size:11px;" onclick="rfmGoToPath()" title="Go">
-            <i class="fas fa-arrow-right"></i> GO
-        </button>
-        <button class="btn-primary" style="padding:6px 12px; font-size:11px;" onclick="rfmRefresh()" title="Refresh">
-            <i class="fas fa-sync-alt"></i>
-        </button>
-    </div>
-    <div style="display:flex; gap:8px;">
-        <button class="btn-primary" style="padding:6px 12px; font-size:11px;" onclick="rfmShowMkdir()">
-            <i class="fas fa-folder-plus"></i> MKDIR
-        </button>
-        <label class="btn-primary" style="padding:6px 12px; font-size:11px; cursor:pointer; display:inline-flex; align-items:center; gap:5px;">
-            <i class="fas fa-cloud-upload-alt"></i> UPLOAD
-            <input type="file" id="rfm-upload-input" style="display:none;" onchange="rfmUploadFiles(this.files)">
-        </label>
-    </div>
-</div>
-
-<!-- Mkdir dialog -->
-<div id="rfm-mkdir-dialog" style="display:none; margin-bottom:15px; padding:12px; background:rgba(26,26,26,0.6); border:1px solid var(--border);">
-    <div style="display:flex; gap:10px; align-items:center;">
-        <input type="text" class="form-input" id="rfm-mkdir-name" placeholder="New folder name" style="flex:1; height:32px; font-size:12px;">
-        <button class="btn-primary" style="padding:6px 14px; font-size:11px;" onclick="rfmCreateDir()">CREATE</button>
-        <button class="btn-primary" style="padding:6px 14px; font-size:11px; opacity:0.5;" onclick="document.getElementById('rfm-mkdir-dialog').style.display='none'">CANCEL</button>
-    </div>
-</div>
-
-<!-- Progress area -->
-<div id="rfm-progress" style="display:none; margin-bottom:15px;"></div>
-
-<!-- File listing -->
-<div id="rfm-list-wrapper" style="display:none;">
-    <div class="list-container" style="overflow-x:auto;">
-        <div class="beacons-header-bar" style="grid-template-columns: 40px 1fr 100px 140px 80px; min-width:500px;">
-            <span></span>
-            <span>Name</span>
-            <span>Size</span>
-            <span>Modified</span>
-            <span style="text-align:right;">Actions</span>
-        </div>
-        <div id="rfm-file-list" style="max-height: calc(100vh - 420px); overflow-y:auto;">
-            <div style="padding:30px; text-align:center; opacity:0.3; font-family:'JetBrains Mono';">SELECT_TARGET_FIRST</div>
+<div style="display:flex; flex-direction:column; height:100%; min-height:0; position:relative;">
+    <div class="section-header module-toolbar-tight" style="flex-shrink:0;">
+        <h3>Remote File Browser</h3>
+        <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+            <select class="form-input" id="rfm-client" style="width:240px; max-width:100%; height:32px; font-size:11px;" onchange="rfmOnClientChange()">
+                <option value="">SELECT_TARGET...</option>
+            </select>
+            <span id="rfm-status" style="font-family:'JetBrains Mono'; font-size:10px; color:#666;">NO_TARGET</span>
         </div>
     </div>
-</div>
 
-<!-- No target placeholder -->
-<div id="rfm-placeholder" style="display:flex; align-items:center; justify-content:center; min-height:300px;">
-    <div style="text-align:center; opacity:0.3;">
-        <i class="fas fa-crosshairs" style="font-size:48px; color:var(--accent); margin-bottom:15px;"></i>
-        <div style="font-family:'JetBrains Mono'; font-size:13px;">SELECT_TARGET_TO_BROWSE_FILES</div>
+    <!-- Toolbar -->
+    <div id="rfm-toolbar" style="display:none; gap:10px; align-items:center; margin-bottom:15px; flex-wrap:wrap; flex-shrink:0;">
+        <div style="flex:1; display:flex; align-items:center; gap:8px; min-width:300px;">
+            <button class="btn-primary" style="padding:6px 12px; font-size:11px;" onclick="rfmGoUp()" title="Up">
+                <i class="fas fa-level-up-alt"></i>
+            </button>
+            <button class="btn-primary" style="padding:6px 12px; font-size:11px;" onclick="rfmGoToDrives()" title="Drives / Root">
+                <i class="fas fa-hdd"></i>
+            </button>
+            <input type="text" class="form-input" id="rfm-path-input" placeholder="Enter path..." style="flex:1; height:30px; font-size:11px; font-family:'JetBrains Mono',monospace; color:var(--accent); min-width:100px;" onkeydown="if(event.key==='Enter')rfmGoToPath()">
+            <button class="btn-primary" style="padding:6px 12px; font-size:11px;" onclick="rfmGoToPath()" title="Go">
+                <i class="fas fa-arrow-right"></i> GO
+            </button>
+            <button class="btn-primary" style="padding:6px 12px; font-size:11px;" onclick="rfmRefresh()" title="Refresh">
+                <i class="fas fa-sync-alt"></i>
+            </button>
+        </div>
+        <div style="display:flex; gap:8px; flex-shrink:0;">
+            <button class="btn-primary" style="padding:6px 12px; font-size:11px;" onclick="rfmShowMkdir()">
+                <i class="fas fa-folder-plus"></i> MKDIR
+            </button>
+            <label class="btn-primary" style="padding:6px 12px; font-size:11px; cursor:pointer; display:inline-flex; align-items:center; gap:5px; margin:0;">
+                <i class="fas fa-cloud-upload-alt"></i> UPLOAD
+                <input type="file" id="rfm-upload-input" style="display:none;" onchange="rfmUploadFiles(this.files)">
+            </label>
+        </div>
+    </div>
+
+    <!-- Mkdir dialog -->
+    <div id="rfm-mkdir-dialog" style="display:none; margin-bottom:15px; padding:12px; background:rgba(26,26,26,0.6); border:1px solid var(--border); flex-shrink:0;">
+        <div style="display:flex; gap:10px; align-items:center;">
+            <input type="text" class="form-input" id="rfm-mkdir-name" placeholder="New folder name" style="flex:1; height:32px; font-size:12px;">
+            <button class="btn-primary" style="padding:6px 14px; font-size:11px;" onclick="rfmCreateDir()">CREATE</button>
+            <button class="btn-primary" style="padding:6px 14px; font-size:11px; opacity:0.5;" onclick="document.getElementById('rfm-mkdir-dialog').style.display='none'">CANCEL</button>
+        </div>
+    </div>
+
+    <!-- Progress area -->
+    <div id="rfm-progress" style="display:none; margin-bottom:15px; flex-shrink:0;"></div>
+
+    <!-- Main area: file list + inline editor side by side -->
+    <div style="display:flex; flex:1; min-height:0; gap:0;">
+
+        <!-- File listing panel -->
+        <div id="rfm-list-panel" style="display:flex; flex-direction:column; min-height:0; flex:1; min-width:0; transition:flex 0.2s;">
+            <div id="rfm-list-wrapper" style="display:none; flex:1; min-height:0;">
+                <div class="list-container" style="height:100%; display:flex; flex-direction:column; overflow-x:auto;">
+                    <div class="beacons-header-bar" style="grid-template-columns: 40px 1fr 100px 140px 120px; min-width:500px; flex-shrink:0;">
+                        <span></span>
+                        <span>Name</span>
+                        <span>Size</span>
+                        <span>Modified</span>
+                        <span style="text-align:right;">Actions</span>
+                    </div>
+                    <div id="rfm-file-list" style="flex:1; overflow-y:auto; min-height:0;">
+                        <div style="padding:30px; text-align:center; opacity:0.3; font-family:'JetBrains Mono';">SELECT_TARGET_FIRST</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- No target placeholder -->
+            <div id="rfm-placeholder" style="display:flex; flex:1; align-items:center; justify-content:center; min-height:200px;">
+                <div style="text-align:center; opacity:0.3;">
+                    <i class="fas fa-crosshairs" style="font-size:48px; color:var(--accent); margin-bottom:15px;"></i>
+                    <div style="font-family:'JetBrains Mono'; font-size:13px;">SELECT_TARGET_TO_BROWSE_FILES</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Inline Editor panel (hidden by default, slides in from right) -->
+        <div id="rfm-editor-panel" style="display:none; flex-direction:column; width:60%; min-width:400px; max-width:75%; border-left:2px solid var(--accent); background:#1e1e1e; min-height:0; flex-shrink:0;">
+            <!-- Editor header -->
+            <div style="padding:6px 12px; background:#252526; border-bottom:1px solid #3c3c3c; display:flex; justify-content:space-between; align-items:center; flex-shrink:0; min-height:40px;">
+                <div style="display:flex; align-items:center; gap:10px; overflow:hidden; flex:1; min-width:0;">
+                    <i class="fas fa-code" style="color:var(--accent); font-size:11px; flex-shrink:0;"></i>
+                    <span id="rfm-editor-filename" style="font-family:'JetBrains Mono'; color:var(--accent); font-size:12px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">EDITING_FILE</span>
+                    <div id="rfm-editor-stats" style="font-family:'JetBrains Mono'; font-size:9px; color:#555; display:flex; gap:8px; flex-shrink:0;">
+                        <span id="rfm-editor-word-count">Words: 0</span>
+                        <span id="rfm-editor-newline">LF</span>
+                        <span id="rfm-editor-sha" style="opacity:0.5;">SHA: -</span>
+                    </div>
+                </div>
+                <div style="display:flex; gap:6px; flex-shrink:0; margin-left:8px;">
+                    <button class="btn-primary" style="padding:3px 12px; font-size:11px;" onclick="rfmSaveFile()" title="Ctrl+S">
+                        <i class="fas fa-save"></i> SAVE
+                    </button>
+                    <button class="btn-primary" style="padding:3px 10px; font-size:11px; background:#3a3a3a;" onclick="rfmCloseEditor()" title="Close editor">
+                        <i class="fas fa-times"></i>
+                    </button>
+                </div>
+            </div>
+            <!-- Monaco container -->
+            <div id="rfm-monaco-container" style="flex:1; width:100%; min-height:0; position:relative;"></div>
+        </div>
+
     </div>
 </div>
 
@@ -77,7 +112,7 @@
     let currentClientId = '';
     let currentPath = '.';
     const escapeHtml = window.PRTS.escapeHtml;
-    const fileListColumns = 'grid-template-columns: 40px 1fr 100px 140px 80px; padding:8px 20px; min-width:500px;';
+    const fileListColumns = 'grid-template-columns: 40px 1fr 100px 140px 120px; padding:8px 20px; min-width:500px;';
 
     function formatSize(bytes) {
         if (!bytes || bytes === 0) return '-';
@@ -157,7 +192,9 @@
         const placeholder = document.getElementById('rfm-placeholder');
         if (!toolbar || !listWrapper || !placeholder) return;
         toolbar.style.display = hasTarget ? 'flex' : 'none';
-        listWrapper.style.display = hasTarget ? 'block' : 'none';
+        // rfm-list-wrapper is now inside rfm-list-panel, use flex to fill
+        listWrapper.style.display = hasTarget ? 'flex' : 'none';
+        listWrapper.style.flexDirection = 'column';
         placeholder.style.display = hasTarget ? 'none' : 'flex';
     }
 
@@ -198,11 +235,20 @@
     function renderActionCell(item, safePath) {
         let html = '<span style="text-align:right; display:flex; gap:10px; justify-content:flex-end; font-size:11px;">';
         if (!item.is_dir) {
+            if (isTextFile(item.name)) {
+                html += '<span style="color:var(--accent); cursor:pointer;" onclick="rfmEditFile(\'' + safePath + '\')" title="Edit"><i class="fas fa-edit"></i></span>';
+            }
             html += '<span style="color:var(--accent); cursor:pointer;" onclick="rfmDownloadFile(\'' + safePath + '\',' + (item.size || 0) + ')" title="Download"><i class="fas fa-download"></i></span>';
         }
         html += '<span style="color:#ff3b30; cursor:pointer;" onclick="rfmDeleteItem(\'' + safePath + '\')" title="Delete"><i class="fas fa-trash"></i></span>';
         html += '</span>';
         return html;
+    }
+
+    function isTextFile(name) {
+        const ext = '.' + name.split('.').pop().toLowerCase();
+        const textExts = ['.txt', '.php', '.js', '.py', '.html', '.css', '.json', '.sh', '.ps1', '.go', '.bat', '.ini', '.conf', '.cfg', '.yaml', '.yml', '.md', '.log', '.xml', '.c', '.cpp', '.h', '.hpp', '.java', '.rs', '.toml', '.env', '.sql', '.csv', '.tsv', '.properties', '.ts', '.jsx', '.tsx', '.vue', '.rb', '.pl', '.lua', '.r', '.swift', '.kt', '.scala', '.gradle', '.tf', '.hcl', '.proto'];
+        return textExts.includes(ext);
     }
 
     function getFileIcon(name, isDir) {
@@ -216,16 +262,31 @@
             'bin': 'fa-microchip" style="color:#9c27b0;', 'raw': 'fa-file-code" style="color:#9c27b0;',
             'zip': 'fa-file-archive" style="color:#ff9800;', 'tar': 'fa-file-archive" style="color:#ff9800;',
             'gz': 'fa-file-archive" style="color:#ff9800;', '7z': 'fa-file-archive" style="color:#ff9800;',
+            'rar': 'fa-file-archive" style="color:#ff9800;',
             'txt': 'fa-file-alt" style="color:#888;', 'log': 'fa-file-alt" style="color:#888;',
             'json': 'fa-file-code" style="color:#888;', 'xml': 'fa-file-code" style="color:#888;',
             'png': 'fa-file-image" style="color:#2196F3;', 'jpg': 'fa-file-image" style="color:#2196F3;',
+            'jpeg': 'fa-file-image" style="color:#2196F3;', 'gif': 'fa-file-image" style="color:#2196F3;',
+            'svg': 'fa-file-image" style="color:#2196F3;', 'ico': 'fa-file-image" style="color:#2196F3;',
             'pdf': 'fa-file-pdf" style="color:#ff3b30;',
             'doc': 'fa-file-word" style="color:#2b579a;', 'docx': 'fa-file-word" style="color:#2b579a;',
             'xls': 'fa-file-excel" style="color:#217346;', 'xlsx': 'fa-file-excel" style="color:#217346;',
-            'db': 'fa-database" style="color:#888;', 'sqlite': 'fa-database" style="color:#888;',
-            'key': 'fa-key" style="color:#f5a623;', 'pem': 'fa-key" style="color:#f5a623;',
+            'ppt': 'fa-file-powerpoint" style="color:#d24726;', 'pptx': 'fa-file-powerpoint" style="color:#d24726;',
+            'db': 'fa-database" style="color:#888;', 'sqlite': 'fa-database" style="color:#888;', 'sql': 'fa-database" style="color:#888;',
+            'key': 'fa-key" style="color:#f5a623;', 'pem': 'fa-key" style="color:#f5a623;', 'crt': 'fa-key" style="color:#f5a623;',
             'conf': 'fa-cogs" style="color:#888;', 'cfg': 'fa-cogs" style="color:#888;',
-            'ini': 'fa-cogs" style="color:#888;',
+            'ini': 'fa-cogs" style="color:#888;', 'toml': 'fa-cogs" style="color:#888;', 'env': 'fa-cogs" style="color:#888;',
+            'js': 'fa-code" style="color:#f7df1e;', 'ts': 'fa-code" style="color:#3178c6;',
+            'jsx': 'fa-code" style="color:#61dafb;', 'tsx': 'fa-code" style="color:#3178c6;',
+            'html': 'fa-code" style="color:#e34c26;', 'css': 'fa-code" style="color:#563d7c;',
+            'go': 'fa-code" style="color:#00ADD8;', 'rs': 'fa-code" style="color:#dea584;',
+            'java': 'fa-code" style="color:#b07219;', 'c': 'fa-code" style="color:#555555;',
+            'cpp': 'fa-code" style="color:#f34b7d;', 'h': 'fa-code" style="color:#555555;',
+            'rb': 'fa-code" style="color:#701516;', 'php': 'fa-code" style="color:#4F5D95;',
+            'swift': 'fa-code" style="color:#ffac45;', 'kt': 'fa-code" style="color:#A97BFF;',
+            'yaml': 'fa-file-code" style="color:#888;', 'yml': 'fa-file-code" style="color:#888;',
+            'md': 'fa-file-alt" style="color:#888;',
+            'csv': 'fa-file-csv" style="color:#217346;',
         };
         return icons[ext] || 'fa-file" style="color:#666;';
     }
@@ -521,7 +582,172 @@
         if (e.key === 'Escape') document.getElementById('rfm-mkdir-dialog').style.display = 'none';
     });
 
+    // --- Editor Logic ---
+    let rfmMonacoEditor = null;
+    let rfmCurrentFileSHA = '';
+    let rfmCurrentFilePath = '';
+
+    function getMonacoLanguage(name) {
+        const ext = name.split('.').pop().toLowerCase();
+        const languages = {
+            'js': 'javascript', 'ts': 'typescript', 'jsx': 'javascript', 'tsx': 'typescript',
+            'py': 'python', 'php': 'php',
+            'html': 'html', 'css': 'css', 'json': 'json', 'go': 'go', 'sh': 'shell',
+            'ps1': 'powershell', 'bat': 'bat', 'yaml': 'yaml', 'yml': 'yaml',
+            'xml': 'xml', 'md': 'markdown', 'sql': 'sql',
+            'c': 'c', 'cpp': 'cpp', 'h': 'c', 'hpp': 'cpp',
+            'java': 'java', 'rs': 'rust', 'rb': 'ruby', 'lua': 'lua',
+            'swift': 'swift', 'kt': 'kotlin', 'scala': 'scala',
+            'r': 'r', 'pl': 'perl',
+            'ini': 'ini', 'toml': 'ini', 'cfg': 'ini', 'conf': 'ini',
+            'dockerfile': 'dockerfile', 'tf': 'hcl',
+            'proto': 'protobuf', 'vue': 'html',
+        };
+        return languages[ext] || 'plaintext';
+    }
+
+    window.rfmEditFile = async function(path) {
+        rfmCurrentFilePath = path;
+
+        // Show the inline editor panel (right side), shrink file list
+        const editorPanel = document.getElementById('rfm-editor-panel');
+        const listPanel = document.getElementById('rfm-list-panel');
+        if (editorPanel) { editorPanel.style.display = 'flex'; }
+        if (listPanel) { listPanel.style.flex = '0 0 40%'; listPanel.style.minWidth = '200px'; }
+
+        document.getElementById('rfm-editor-filename').textContent = 'LOADING: ' + path.split(/[/\\]/).pop();
+
+        try {
+            const requestUrl = PRTS.apiUrl('/api/rfm/download', { client_id: currentClientId, path: path });
+            const apiResp = await PRTS.api.get(requestUrl);
+            const result = apiResp.result;
+
+            if (result.status !== 'success') {
+                throw new Error(result.message || 'fetch failed');
+            }
+
+            const b64 = result.data.base64;
+            const raw = atob(b64);
+            const bytes = new Uint8Array(raw.length);
+            for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+            const content = new TextDecoder('utf-8').decode(bytes);
+
+            rfmCurrentFileSHA = result.data.sha256 || '';
+
+            document.getElementById('rfm-editor-filename').textContent = path.split(/[/\\]/).pop();
+            document.getElementById('rfm-editor-sha').textContent = 'SHA: ' + (rfmCurrentFileSHA ? rfmCurrentFileSHA.substring(0, 8) + '...' : 'UNKNOWN');
+
+            // Initialize Monaco - always create fresh since we dispose on close
+            require(['vs/editor/editor.main'], function() {
+                const container = document.getElementById('rfm-monaco-container');
+                if (!container) return;
+                container.innerHTML = '';
+
+                rfmMonacoEditor = monaco.editor.create(container, {
+                    value: content,
+                    language: getMonacoLanguage(path),
+                    theme: 'vs-dark',
+                    automaticLayout: true,
+                    fontSize: 13,
+                    fontFamily: 'JetBrains Mono',
+                    minimap: { enabled: false },
+                    scrollBeyondLastLine: false,
+                    renderWhitespace: 'selection',
+                    insertSpaces: true,
+                    tabSize: 4,
+                    detectIndentation: true,
+                    wordWrap: 'off',
+                });
+
+                rfmMonacoEditor.onDidChangeModelContent(() => {
+                    updateRfmEditorStats();
+                });
+
+                rfmMonacoEditor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, function() {
+                    rfmSaveFile();
+                });
+
+                updateRfmEditorStats();
+                setTimeout(function() { rfmMonacoEditor.layout(); }, 80);
+            });
+
+        } catch(e) {
+            showNotification('ERROR: ' + e.message);
+            rfmCloseEditor();
+        }
+    };
+
+    function updateRfmEditorStats() {
+        if (!rfmMonacoEditor) return;
+        const text = rfmMonacoEditor.getValue();
+        const words = text.trim() ? text.trim().split(/\s+/).length : 0;
+        const chars = text.length;
+        document.getElementById('rfm-editor-word-count').textContent = `Words: ${words} | Chars: ${chars}`;
+        
+        const model = rfmMonacoEditor.getModel();
+        const eol = model.getEOL();
+        document.getElementById('rfm-editor-newline').textContent = eol === '\n' ? 'LF' : 'CRLF';
+    }
+
+    window.rfmSaveFile = async function() {
+        if (!rfmMonacoEditor) return;
+        const content = rfmMonacoEditor.getValue();
+        
+        try {
+            const apiResp = await PRTS.api.post('/api/rfm/edit', {
+                client_id: currentClientId,
+                path: rfmCurrentFilePath,
+                content: content,
+                original_sha256: rfmCurrentFileSHA
+            });
+            
+            const result = apiResp.result;
+            if (result.status === 'success') {
+                showNotification('FILE_SAVED_SUCCESSFULLY');
+                rfmCurrentFileSHA = result.data.new_sha256;
+                document.getElementById('rfm-editor-sha').textContent = 'SHA: ' + rfmCurrentFileSHA.substring(0, 8) + '...';
+                rfmRefresh();
+            } else {
+                if (result.message.includes('CONFLICT')) {
+                    if (confirm('CONFLICT: File was modified by someone else. Overwrite?')) {
+                        if (result.data && result.data.current_sha256) {
+                            rfmCurrentFileSHA = result.data.current_sha256;
+                            rfmSaveFile();
+                        }
+                    }
+                } else {
+                    showNotification('ERROR: ' + result.message);
+                }
+            }
+        } catch(e) { showNotification('ERROR: ' + e.message); }
+    };
+
+    window.rfmCloseEditor = function() {
+        // Hide the inline editor panel and restore full-width file list
+        const editorPanel = document.getElementById('rfm-editor-panel');
+        const listPanel = document.getElementById('rfm-list-panel');
+        if (editorPanel) editorPanel.style.display = 'none';
+        if (listPanel) { listPanel.style.flex = '1'; listPanel.style.minWidth = '0'; }
+
+        // Dispose the editor instance to free memory and avoid stale state
+        if (rfmMonacoEditor) {
+            rfmMonacoEditor.dispose();
+            rfmMonacoEditor = null;
+        }
+        const container = document.getElementById('rfm-monaco-container');
+        if (container) container.innerHTML = '';
+    };
+
+    // ESC key closes the editor
+    document.addEventListener('keydown', function(e) {
+        if (e.key === 'Escape') {
+            const panel = document.getElementById('rfm-editor-panel');
+            if (panel && panel.style.display !== 'none') rfmCloseEditor();
+        }
+    });
+
     // Init
+    require.config({ paths: { 'vs': 'https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.45.0/min/vs' }});
     loadClients();
 })();
 </script>

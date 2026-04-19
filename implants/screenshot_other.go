@@ -19,11 +19,11 @@ func captureScreenshot() string {
 		name string
 		args []string
 	}{
-		{"import", []string{"-window", "root", tmpFile}},                    // ImageMagick
-		{"scrot", []string{tmpFile}},                                        // scrot
-		{"gnome-screenshot", []string{"-f", tmpFile}},                       // GNOME
+		{"import", []string{"-window", "root", tmpFile}},                     // ImageMagick
+		{"scrot", []string{tmpFile}},                                         // scrot
+		{"gnome-screenshot", []string{"-f", tmpFile}},                        // GNOME
 		{"xfce4-screenshooter", []string{"--fullscreen", "--save", tmpFile}}, // XFCE
-		{"maim", []string{tmpFile}},                                         // maim
+		{"maim", []string{tmpFile}},                                          // maim
 	}
 
 	captured := false

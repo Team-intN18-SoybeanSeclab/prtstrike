@@ -3,11 +3,8 @@
 package main
 
 import (
-	"bytes"
 	"encoding/base64"
-	"image"
-	"image/color"
-	"image/png"
+	"encoding/binary"
 	"syscall"
 	"unsafe"
 )
@@ -44,9 +41,9 @@ const (
 	biRGB             = 0
 	dibRGBColors      = 0
 
-	processPerMonitorDPIAware       = 2
-	eAccessDenied                   = 0x80070005
-	dpiAwarenessPerMonitorAwareV2   = ^uintptr(3) // -4
+	processPerMonitorDPIAware     = 2
+	eAccessDenied                 = 0x80070005
+	dpiAwarenessPerMonitorAwareV2 = ^uintptr(3) // -4
 )
 
 type bitmapInfoHeader struct {
@@ -156,24 +153,37 @@ func captureScreenshot() string {
 		return "Error: GetDIBits failed"
 	}
 
-	// Convert BGRA pixel data to Go RGBA image
-	img := image.NewRGBA(image.Rect(0, 0, width, height))
+	// Encode as BMP directly — avoids importing image/png (~1.5MB savings)
+	// BMP with BITMAPINFOHEADER, 24-bit RGB, no compression
+	rowSize := (width*3 + 3) & ^3 // rows padded to 4-byte boundary
+	imgSize := rowSize * height
+	fileSize := 54 + imgSize // 14 (file header) + 40 (info header) + pixel data
+
+	bmp := make([]byte, fileSize)
+	// -- File Header (14 bytes) --
+	bmp[0], bmp[1] = 'B', 'M'
+	binary.LittleEndian.PutUint32(bmp[2:], uint32(fileSize))
+	binary.LittleEndian.PutUint32(bmp[10:], 54) // pixel data offset
+	// -- Info Header (40 bytes) --
+	binary.LittleEndian.PutUint32(bmp[14:], 40)              // header size
+	binary.LittleEndian.PutUint32(bmp[18:], uint32(width))   // width
+	binary.LittleEndian.PutUint32(bmp[22:], uint32(height))  // height (positive = bottom-up)
+	binary.LittleEndian.PutUint16(bmp[26:], 1)               // planes
+	binary.LittleEndian.PutUint16(bmp[28:], 24)              // bits per pixel
+	binary.LittleEndian.PutUint32(bmp[34:], uint32(imgSize)) // image size
+
+	// Write pixel data (BGRA source -> BGR BMP, bottom-up row order)
 	for y := 0; y < height; y++ {
+		srcRow := y * width * 4             // source is top-down (negative height DIB)
+		dstRow := 54 + (height-1-y)*rowSize // BMP is bottom-up
 		for x := 0; x < width; x++ {
-			off := (y*width + x) * 4
-			img.SetRGBA(x, y, color.RGBA{
-				R: pixels[off+2],
-				G: pixels[off+1],
-				B: pixels[off],
-				A: 255,
-			})
+			sOff := srcRow + x*4
+			dOff := dstRow + x*3
+			bmp[dOff] = pixels[sOff]     // B
+			bmp[dOff+1] = pixels[sOff+1] // G
+			bmp[dOff+2] = pixels[sOff+2] // R
 		}
 	}
 
-	var buf bytes.Buffer
-	if err := png.Encode(&buf, img); err != nil {
-		return "Error: PNG encode failed: " + err.Error()
-	}
-
-	return "SCREENSHOT:" + base64.StdEncoding.EncodeToString(buf.Bytes())
+	return "SCREENSHOT:" + base64.StdEncoding.EncodeToString(bmp)
 }

