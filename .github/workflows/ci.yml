@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Vet server
+        run: go vet ./...
+
+      - name: Test server
+        run: go test -count=1 ./...
+
+      - name: Test lightweight build tag
+        run: go test -count=1 -tags=nomsgpack ./...
+
+      - name: Build lightweight server
+        run: >-
+          CGO_ENABLED=0 go build -trimpath -buildvcs=false
+          -tags=nomsgpack -ldflags="-s -w -buildid=" -o prtstrike .
+
+      - name: Build implant
+        working-directory: implants
+        run: go build -trimpath -buildvcs=false -ldflags="-s -w -buildid=" .
+
+      - name: Check script syntax
+        run: |
+          bash -n implants/beacon.sh
+          python3 -m py_compile implants/beacon.py

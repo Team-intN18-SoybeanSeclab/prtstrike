@@ -37,13 +37,25 @@
 (function() {
     let allTasks = [];
 
+    function escapeHtml(value) {
+        return String(value ?? '').replace(/[&<>"']/g, ch => ({
+            '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+        }[ch]));
+    }
+
+    function escapeJsString(value) {
+        return String(value ?? '').replace(/[\\'\r\n]/g, ch => ({
+            '\\': '\\\\', "'": "\\'", '\r': '\\r', '\n': '\\n'
+        }[ch]));
+    }
+
     async function loadClients() {
         try {
             const apiResp = await PRTS.api.get('/api/clients');
             const result = apiResp.result;
             const sel = document.getElementById('task-filter-client');
             if (sel && result.data) {
-                const opts = result.data.map(c => `<option value="${c.id}">${c.id} (${c.ip})</option>`).join('');
+                const opts = result.data.map(c => `<option value="${escapeHtml(c.id)}">${escapeHtml(c.id)} (${escapeHtml(c.ip)})</option>`).join('');
                 sel.innerHTML = '<option value="">ALL_CLIENTS</option>' + opts;
             }
         } catch(e) {}
@@ -82,17 +94,17 @@
 
         container.innerHTML = tasks.map(t => {
             const color = statusColors[t.status] || '#888';
-            const resultPreview = t.result ? t.result.replace(/</g,'&lt;') : '-';
+            const resultPreview = t.result ? escapeHtml(t.result) : '-';
             const created = new Date(t.created_at).toLocaleString();
             const resultCursor = t.has_result ? 'pointer' : 'default';
             const resultTitle = t.has_result ? 'Click to expand' : 'No result';
             return `
             <div class="beacon-row" style="grid-template-columns: 120px 120px 2fr 100px 2fr 150px; padding:8px 20px; font-size:11px;">
-                <span style="font-family:'JetBrains Mono'; color:var(--accent);">${t.id}</span>
-                <span style="font-family:'JetBrains Mono'; color:#888;">${t.client_id}</span>
-                <span style="font-family:'JetBrains Mono'; word-break:break-all;">${t.command}</span>
-                <span style="color:${color}; font-weight:bold; text-transform:uppercase;">${t.status}</span>
-                <span style="font-family:'JetBrains Mono'; color:#aaa; cursor:${resultCursor};" onclick="expandTaskResult('${t.id}')" title="${resultTitle}">${resultPreview}</span>
+                <span style="font-family:'JetBrains Mono'; color:var(--accent);">${escapeHtml(t.id)}</span>
+                <span style="font-family:'JetBrains Mono'; color:#888;">${escapeHtml(t.client_id)}</span>
+                <span style="font-family:'JetBrains Mono'; word-break:break-all;">${escapeHtml(t.command)}</span>
+                <span style="color:${color}; font-weight:bold; text-transform:uppercase;">${escapeHtml(t.status)}</span>
+                <span style="font-family:'JetBrains Mono'; color:#aaa; cursor:${resultCursor};" onclick="expandTaskResult('${escapeHtml(escapeJsString(t.id))}')" title="${escapeHtml(resultTitle)}">${resultPreview}</span>
                 <span style="color:#666;">${created}</span>
             </div>`;
         }).join('');
@@ -111,12 +123,12 @@
             }
             task = result.data;
         } catch (e) {
-            const safeMsg = (e.message || 'failed to load task').replace(/</g, '&lt;');
+            const safeMsg = escapeHtml(e.message || 'failed to load task');
             const html = `
             <div style="position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.85);backdrop-filter:blur(10px);z-index:2001;display:flex;align-items:center;justify-content:center;" onclick="if(event.target===this)this.remove()">
                 <div style="width:700px;max-height:80vh;background:#0a0a0a;border:1px solid var(--accent);">
                     <div style="padding:10px 20px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;">
-                        <span style="font-family:'JetBrains Mono';font-size:11px;color:var(--accent);">${summary.id} // ${summary.command}</span>
+                        <span style="font-family:'JetBrains Mono';font-size:11px;color:var(--accent);">${escapeHtml(summary.id)} // ${escapeHtml(summary.command)}</span>
                         <span style="cursor:pointer;color:var(--accent);font-size:18px;" onclick="this.closest('[style*=fixed]').remove()">&times;</span>
                     </div>
                     <div style="padding:15px 20px;color:#f44336;font-family:'JetBrains Mono';font-size:11px;">ERROR: ${safeMsg}</div>
@@ -139,14 +151,14 @@
                 <img src="data:${mime};base64,${b64}" style="max-width:100%;max-height:80vh;border:1px solid var(--border);cursor:pointer;" onclick="window.open(this.src,'_blank')" title="Click to open full size">
             </div>`;
         } else {
-            contentHtml = `<pre style="padding:15px 20px;font-family:'JetBrains Mono';font-size:11px;color:#ccc;overflow:auto;max-height:70vh;white-space:pre-wrap;word-break:break-all;">${(task.result || '').replace(/</g,'&lt;')}</pre>`;
+            contentHtml = `<pre style="padding:15px 20px;font-family:'JetBrains Mono';font-size:11px;color:#ccc;overflow:auto;max-height:70vh;white-space:pre-wrap;word-break:break-all;">${escapeHtml(task.result || '')}</pre>`;
         }
 
         const html = `
         <div style="position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.85);backdrop-filter:blur(10px);z-index:2001;display:flex;align-items:center;justify-content:center;" onclick="if(event.target===this)this.remove()">
             <div style="${dialogStyle}background:#0a0a0a;border:1px solid var(--accent);">
                 <div style="padding:10px 20px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;">
-                    <span style="font-family:'JetBrains Mono';font-size:11px;color:var(--accent);">${task.id} // ${task.command}</span>
+                    <span style="font-family:'JetBrains Mono';font-size:11px;color:var(--accent);">${escapeHtml(task.id)} // ${escapeHtml(task.command)}</span>
                     <span style="cursor:pointer;color:var(--accent);font-size:18px;" onclick="this.closest('[style*=fixed]').remove()">&times;</span>
                 </div>
                 ${contentHtml}

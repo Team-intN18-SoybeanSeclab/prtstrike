@@ -42,13 +42,19 @@
     const levelColors = {
         'SYS': '#4caf50', 'C2': '#2196f3', 'TASK': '#ff9800', 'NET': '#00bcd4',
         'SEC': '#9c27b0', 'ERR': '#f44336', 'CHAT': '#e0e0e0', 'GEN': '#ff9800',
-        'CONFIG': '#795548', 'FILE': '#607d8b', 'PROXY': '#3f51b5', 'INFO': '#888'
+        'CONFIG': '#795548', 'FILE': '#607d8b', 'INFO': '#888'
     };
 
     function addLogEntry(time, level, message) {
         logEntries.push({ time, level, message });
         if (logEntries.length > 500) logEntries.shift();
         renderFilteredLogs();
+    }
+
+    function escapeHtml(value) {
+        return String(value ?? '').replace(/[&<>"']/g, ch => ({
+            '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+        }[ch]));
     }
 
     function renderFilteredLogs() {
@@ -59,9 +65,9 @@
         logBody.innerHTML = filtered.map(e => {
             const color = levelColors[e.level] || '#888';
             return `<div style="margin-bottom:3px; display:flex; gap:10px;">
-                <span style="color:rgba(255,255,255,0.25); min-width:60px;">[${e.time}]</span>
-                <span style="color:${color}; font-weight:bold; min-width:60px;">[${e.level}]</span>
-                <span style="color:#eee;">${e.message}</span>
+                <span style="color:rgba(255,255,255,0.25); min-width:60px;">[${escapeHtml(e.time)}]</span>
+                <span style="color:${color}; font-weight:bold; min-width:60px;">[${escapeHtml(e.level)}]</span>
+                <span style="color:#eee;">${escapeHtml(e.message)}</span>
             </div>`;
         }).join('');
 

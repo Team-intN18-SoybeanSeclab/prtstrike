@@ -11,7 +11,7 @@ RUN go mod download
 
 # 复制源代码并编译
 COPY . .
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o prtstrike .
+RUN CGO_ENABLED=0 go build -trimpath -buildvcs=false -tags=nomsgpack -ldflags="-s -w -buildid=" -o prtstrike .
 
 # ===== Runtime Stage =====
 FROM alpine:3.19
@@ -24,7 +24,6 @@ WORKDIR /app
 COPY --from=builder /build/prtstrike .
 COPY --from=builder /build/static ./static
 COPY --from=builder /build/implants ./implants
-COPY --from=builder /build/tools ./tools
 
 EXPOSE 8083
 

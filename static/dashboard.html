@@ -1718,10 +1718,6 @@
                         <i class="fas fa-tasks"></i>
                         <span class="nav-label">TASKS</span>
                     </a>
-                    <a href="#" class="nav-item" data-page="proxies">
-                        <i class="fas fa-random"></i>
-                        <span class="nav-label">PROXIES</span>
-                    </a>
                     <a href="#" class="nav-item" data-page="settings">
                         <i class="fas fa-cog"></i>
                         <span class="nav-label">SETTINGS</span>
@@ -1790,6 +1786,8 @@
         // --- state ---
         const state = {
             clients: [],
+            clientsFetchInFlight: false,
+            clientsRefreshTimer: null,
             ws: null,
             maxLogs: 100,
             username: 'Operator'
@@ -1864,6 +1862,8 @@
         }
 
         async function fetchClients() {
+            if (state.clientsFetchInFlight) return;
+            state.clientsFetchInFlight = true;
             try {
                 const response = await PRTS.api.request('/api/clients');
                 
@@ -1880,8 +1880,21 @@
                 }
             } catch (error) {
                 appendLog('ERROR', 'FAILED TO FETCH CLIENTS: ' + error.message, 'error');
+            } finally {
+                state.clientsFetchInFlight = false;
             }
         }
+
+        function startClientRefresh() {
+            if (state.clientsRefreshTimer !== null) return;
+            state.clientsRefreshTimer = setInterval(() => {
+                if (!document.hidden) fetchClients();
+            }, 10000);
+        }
+
+        document.addEventListener('visibilitychange', () => {
+            if (!document.hidden) fetchClients();
+        });
 
         // --- UI render ---
         function updateMetrics() {
@@ -1917,6 +1930,18 @@
             );
         }
 
+        function escapeHtml(value) {
+            return String(value ?? '').replace(/[&<>"']/g, ch => ({
+                '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+            }[ch]));
+        }
+
+        function escapeJsString(value) {
+            return String(value ?? '').replace(/[\\'\r\n]/g, ch => ({
+                '\\': '\\\\', "'": "\\'", '\r': '\\r', '\n': '\\n'
+            }[ch]));
+        }
+
         function renderClients() {
             const container = document.getElementById('beacons-list-body');
             if (!container) return;
@@ -1940,37 +1965,40 @@
                 const osIcon = client.os.toLowerCase().includes('win') ? 'windows' : 'linux';
                 const osColor = client.os.toLowerCase().includes('win') ? '#00a4ef' : '#f0ad4e';
                 const adminBadge = client.is_admin ? '<span style="color:#ff9800;font-size:9px;margin-left:4px;" title="Admin">&#9733;</span>' : '';
-                const userDisplay = (client.username || '-') + adminBadge;
-                const hostDisplay = client.hostname || client.name || '-';
-                const ipDisplay = client.internal_ip || client.ip || '-';
+                const userDisplay = escapeHtml(client.username || '-') + adminBadge;
+                const hostDisplay = escapeHtml(client.hostname || client.name || '-');
+                const ipDisplay = escapeHtml(client.internal_ip || client.ip || '-');
+                const safeClientID = escapeHtml(escapeJsString(client.id || ''));
+                const safeIP = escapeHtml(escapeJsString(client.ip || ''));
+                const safeStatus = escapeHtml(String(client.status || 'offline').replace(/[^a-z0-9_-]/gi, ''));
                 row.innerHTML = `
                     <div style="display:flex;align-items:center;justify-content:center;">
                         <i class="fab fa-${osIcon}" style="color:${osColor}; font-size:16px;"></i>
                     </div>
                     <div style="display:flex;flex-direction:column;gap:2px;">
                         <span style="font-weight:bold;color:#fff;">${hostDisplay}</span>
-                        <span style="font-size:9px;color:#666;">${client.id.substring(0,16)}</span>
+                        <span style="font-size:9px;color:#666;">${escapeHtml(String(client.id || '').substring(0,16))}</span>
                     </div>
                     <div class="ip-cell" style="display:flex;flex-direction:column;gap:2px;">
-                        <span>${client.ip}</span>
-                        <span style="font-size:9px;color:#555;">${ipDisplay !== client.ip ? ipDisplay : ''}</span>
+                        <span>${escapeHtml(client.ip || '')}</span>
+                        <span style="font-size:9px;color:#555;">${ipDisplay !== escapeHtml(client.ip || '') ? ipDisplay : ''}</span>
                     </div>
                     <div style="font-size:10px; white-space:nowrap;">
-                        ${client.country_code ? countryFlag(client.country_code) + ' ' : ''}<span style="color:#888;">${client.country_code || '-'}</span>
+                        ${client.country_code ? countryFlag(client.country_code) + ' ' : ''}<span style="color:#888;">${escapeHtml(client.country_code || '-')}</span>
                     </div>
                     <div style="font-family:'JetBrains Mono';">${userDisplay}</div>
-                    <div style="font-size:10px;color:#888;">${client.process_name || '-'} (${client.pid || '-'})</div>
+                    <div style="font-size:10px;color:#888;">${escapeHtml(client.process_name || '-')} (${escapeHtml(client.pid || '-')})</div>
                     <div class="time-cell">${formatLastSeen(client.last_check)}</div>
                     <div style="font-size:10px;color:#666;">${client.sleep || '-'}s / ${client.jitter || '-'}%</div>
                     <div class="status-cell">
-                        <div class="status-dot ${client.status}"></div>
-                        <span>${client.status.toUpperCase()}</span>
+                        <div class="status-dot ${safeStatus}"></div>
+                        <span>${escapeHtml(String(client.status || '').toUpperCase())}</span>
                     </div>
                     <div class="actions-cell">
-                        <i class="fas fa-terminal action-icon" onclick="event.stopPropagation(); selectBeacon('${client.id}', '${client.ip}')" title="Interact"></i>
-                        <i class="fas fa-camera action-icon" onclick="event.stopPropagation(); takeScreenshot('${client.id}')" title="Screenshot"></i>
-                        <i class="fas fa-info-circle action-icon" onclick="event.stopPropagation(); showBeaconDetail('${client.id}')" title="Detail"></i>
-                        <i class="fas fa-times action-icon danger" onclick="event.stopPropagation(); deleteBeacon('${client.id}')" title="Remove"></i>
+                        <i class="fas fa-terminal action-icon" onclick="event.stopPropagation(); selectBeacon('${safeClientID}', '${safeIP}')" title="Interact"></i>
+                        <i class="fas fa-camera action-icon" onclick="event.stopPropagation(); takeScreenshot('${safeClientID}')" title="Screenshot"></i>
+                        <i class="fas fa-info-circle action-icon" onclick="event.stopPropagation(); showBeaconDetail('${safeClientID}')" title="Detail"></i>
+                        <i class="fas fa-times action-icon danger" onclick="event.stopPropagation(); deleteBeacon('${safeClientID}')" title="Remove"></i>
                     </div>
                 `;
                 
@@ -2065,11 +2093,16 @@
             entry.className = `log-entry ${type}`;
             const time = new Date().toLocaleTimeString('en-GB', { hour12: false });
 
-            entry.innerHTML = `
-                <span class="log-time">[${time}]</span>
-                <span class="log-tag">[${level}]</span>
-                <span class="log-msg">${msg}</span>
-            `;
+            const timeEl = document.createElement('span');
+            timeEl.className = 'log-time';
+            timeEl.textContent = `[${time}]`;
+            const levelEl = document.createElement('span');
+            levelEl.className = 'log-tag';
+            levelEl.textContent = `[${level}]`;
+            const messageEl = document.createElement('span');
+            messageEl.className = 'log-msg';
+            messageEl.textContent = String(msg ?? '');
+            entry.append(timeEl, levelEl, messageEl);
 
             container.appendChild(entry);
 
@@ -2093,7 +2126,6 @@
                 'BYPASSING_EXTERNAL_FIREWALL',
                 'LOADING_OPERATOR_DATABASE',
                 'SYNCING_REAL_TIME_METRICS',
-                'ESTABLISHING_SECURE_TUNNEL',
                 'ALLOCATING_VIRTUAL_MEMORY',
                 'BOOTING_PRTS_SUBSYSTEM'
             ];
@@ -2193,7 +2225,7 @@
 
                     fetchClients();
                     // Periodically refresh client list
-                    setInterval(fetchClients, 10000);
+                    startClientRefresh();
                 }, 500); // Transition duration synced with index.html 1800ms
                 
                 // Force reveal after timeout
@@ -2211,7 +2243,7 @@
                 initWebSocket();
                 loadModule('welcome');
                 fetchClients();
-                setInterval(fetchClients, 10000);
+                startClientRefresh();
             }
         });
 

@@ -60,7 +60,23 @@ docker run -d -p 8083:8083 --name prts prtstrike
    - 沙箱检测（开机时间、硬件规格、分析工具进程）
 ---
 
-## 0x04 Precautions
+## 0x04 注意事项
+
+### Tests
+
+测试命令：
+
+```bash
+go test ./...
+```
+
+### 轻量构建
+
+生产环境可关闭 Gin 的 MsgPack 支持以减小服务端体积：
+
+```bash
+CGO_ENABLED=0 go build -trimpath -buildvcs=false -tags=nomsgpack -ldflags="-s -w -buildid=" -o prtstrike .
+```
 
 - 首次使用时，建议配置 Go 代理：
   ```bash
@@ -73,8 +89,6 @@ docker run -d -p 8083:8083 --name prts prtstrike
 - 默认端口为 **8083**，可在 `main.go` 中修改
 
 - 默认账户 `Adm1nstr@t0r`，密码 `Pr3c1se5!@#$%`，**务必部署后在 Settings 处修改**
-
-- 隧道功能依赖 [Chisel](https://github.com/jpillora/chisel)，需下载二进制放入 `tools/` 目录
 
 ---
 

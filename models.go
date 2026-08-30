@@ -1,17 +1,34 @@
 package main
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"log"
 	"net"
 	"net/http"
+	"net/url"
+	"os"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/glebarez/sqlite"
 	"github.com/gorilla/websocket"
+	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
 )
+
+func hashPassword(password string) (string, error) {
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	return string(hash), err
+}
+
+func verifyPassword(stored, candidate string) (valid, needsUpgrade bool) {
+	if strings.HasPrefix(stored, "$2a$") || strings.HasPrefix(stored, "$2b$") || strings.HasPrefix(stored, "$2y$") {
+		return bcrypt.CompareHashAndPassword([]byte(stored), []byte(candidate)) == nil, false
+	}
+	return subtle.ConstantTimeCompare([]byte(stored), []byte(candidate)) == 1, true
+}
 
 // ══════════════════════════════════════════════════════════
 //  Data Models
@@ -95,21 +112,6 @@ type Task struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
-type Proxy struct {
-	ID         string    `gorm:"primaryKey" json:"id"`
-	ClientID   string    `gorm:"index" json:"client_id"`
-	Type       string    `json:"type"` // chisel_reverse, chisel_forward, chisel_socks
-	Mode       string    `json:"mode"` // server, client
-	ListenPort int       `json:"listen_port"`
-	RemoteStr  string    `json:"remote_str"` // chisel remote spec e.g. "R:socks" or "R:8080:10.0.0.1:80"
-	ServerURL  string    `json:"server_url"` // chisel server URL for client connections
-	AuthKey    string    `json:"auth_key"`
-	WsPath     string    `json:"ws_path"` // randomized websocket path
-	Status     string    `json:"status"`
-	PID        int       `json:"pid"`
-	CreatedAt  time.Time `json:"created_at"`
-}
-
 type APIResponse struct {
 	Status  string      `json:"status"`
 	Message string      `json:"message,omitempty"`
@@ -132,16 +134,25 @@ type CheckInData struct {
 	Jitter      int    `json:"jitter"`
 }
 
+type TaskResultData struct {
+	TaskID   string `json:"task_id"`
+	Output   string `json:"output"`
+	BeaconID string `json:"beacon_id"`
+}
+
 // UploadSession - tracks a chunked upload in progress
 type UploadSession struct {
-	ID          string
-	FileName    string
-	DestPath    string // relative path within managed storage
-	TotalSize   int64
-	TotalChunks int
-	Received    map[int]bool
-	TempDir     string
-	CreatedAt   time.Time
+	ID            string
+	FileName      string
+	DestPath      string // relative path within managed storage
+	TotalSize     int64
+	TotalChunks   int
+	Received      map[int]bool
+	ChunkSizes    map[int]int64
+	ReceivedBytes int64
+	Completed     bool
+	TempDir       string
+	CreatedAt     time.Time
 }
 
 // ══════════════════════════════════════════════════════════
@@ -159,7 +170,17 @@ var (
 	logs = make([]string, 0)
 
 	upgrader = websocket.Upgrader{
-		CheckOrigin: func(r *http.Request) bool { return true },
+		CheckOrigin: func(r *http.Request) bool {
+			origin := r.Header.Get("Origin")
+			if origin == "" {
+				return true
+			}
+			u, err := url.Parse(origin)
+			if err != nil || u.Host == "" {
+				return false
+			}
+			return strings.EqualFold(u.Host, r.Host) && (u.Scheme == "http" || u.Scheme == "https")
+		},
 	}
 
 	// File Manager - upload sessions
@@ -167,12 +188,23 @@ var (
 	uploadSessionsMu sync.Mutex
 
 	// File Manager root
-	fmRoot = "./files"
+	fmRoot = envOrDefault("PRTS_FM_ROOT", "./files")
 )
+
+func envOrDefault(name, fallback string) string {
+	if value := strings.TrimSpace(os.Getenv(name)); value != "" {
+		return value
+	}
+	return fallback
+}
 
 func initDB() {
 	var err error
-	db, err = gorm.Open(sqlite.Open("prts_c2.db"), &gorm.Config{})
+	db, err = gorm.Open(sqlite.Open(envOrDefault("PRTS_DB_PATH", "prts_c2.db")), &gorm.Config{
+		// Explicit db.Transaction calls remain transactional. Independent
+		// single-statement writes no longer pay for an extra BEGIN/COMMIT pair.
+		SkipDefaultTransaction: true,
+	})
 	if err != nil {
 		log.Fatal("failed to connect database:", err)
 	}
@@ -180,7 +212,7 @@ func initDB() {
 	// Auto Migrate all models
 	err = db.AutoMigrate(
 		&User{}, &Client{}, &Listener{}, &Payload{},
-		&Task{}, &Proxy{}, &Settings{},
+		&Task{}, &Settings{},
 	)
 	if err != nil {
 		log.Fatal("failed to migrate database:", err)
@@ -190,7 +222,11 @@ func initDB() {
 	var count int64
 	db.Model(&User{}).Count(&count)
 	if count == 0 {
-		db.Create(&User{Username: "Adm1nstr@t0r", Password: "Pr3c1se5!@#$%"})
+		passwordHash, hashErr := hashPassword("Pr3c1se5!@#$%")
+		if hashErr != nil {
+			log.Fatal("failed to hash default password:", hashErr)
+		}
+		db.Create(&User{Username: "Adm1nstr@t0r", Password: passwordHash})
 		log.Println("[INFO] Default users 'Adm1nstr@t0r' created.")
 	}
 
