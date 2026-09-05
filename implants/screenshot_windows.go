@@ -22,13 +22,12 @@ var (
 	procSetProcessDpiAwarenessCtx    = modUser32.NewProc("SetProcessDpiAwarenessContext")
 	procSetProcessDpiAwarenessShcore = modShcore.NewProc("SetProcessDpiAwareness")
 
-	procCreateCompatibleDC     = modGdi32.NewProc("CreateCompatibleDC")
-	procCreateCompatibleBitmap = modGdi32.NewProc("CreateCompatibleBitmap")
-	procSelectObject           = modGdi32.NewProc("SelectObject")
-	procBitBlt                 = modGdi32.NewProc("BitBlt")
-	procDeleteDC               = modGdi32.NewProc("DeleteDC")
-	procDeleteObject           = modGdi32.NewProc("DeleteObject")
-	procGetDIBits              = modGdi32.NewProc("GetDIBits")
+	procCreateCompatibleDC = modGdi32.NewProc("CreateCompatibleDC")
+	procSelectObject       = modGdi32.NewProc("SelectObject")
+	procBitBlt             = modGdi32.NewProc("BitBlt")
+	procDeleteDC           = modGdi32.NewProc("DeleteDC")
+	procDeleteObject       = modGdi32.NewProc("DeleteObject")
+	procCreateDIBSection   = modGdi32.NewProc("CreateDIBSection")
 )
 
 const (
@@ -88,12 +87,12 @@ func enableHighDPIAwareness() {
 func captureScreenshot() string {
 	enableHighDPIAwareness()
 
-	hwnd, _, _ := procGetDesktopWindow.Call()
 	hdc, _, _ := procGetDC.Call(0) // NULL = entire virtual screen DC
 	if hdc == 0 {
 		return "Error: failed to get device context"
 	}
-	defer procReleaseDC.Call(hwnd, hdc)
+	// ReleaseDC must receive the same hWnd that GetDC received (NULL here).
+	defer procReleaseDC.Call(0, hdc)
 
 	// Virtual screen = all monitors combined
 	x, _, _ := procGetSystemMetrics.Call(smXVirtualScreen)
@@ -115,25 +114,10 @@ func captureScreenshot() string {
 	}
 	defer procDeleteDC.Call(memDC)
 
-	hBitmap, _, _ := procCreateCompatibleBitmap.Call(hdc, w, h)
-	if hBitmap == 0 {
-		return "Error: failed to create compatible bitmap"
-	}
-	defer procDeleteObject.Call(hBitmap)
-
-	old, _, _ := procSelectObject.Call(memDC, hBitmap)
-
-	// BitBlt from virtual screen origin (may be negative for left-of-primary monitors)
-	ret, _, _ := procBitBlt.Call(memDC, 0, 0, w, h, hdc, uintptr(srcX), uintptr(srcY), srccopy|captureBlt)
-	if ret == 0 {
-		procSelectObject.Call(memDC, old)
-		return "Error: BitBlt failed"
-	}
-
-	// Deselect hBitmap from memDC before calling GetDIBits
-	// MSDN: "The bitmap must not be selected into a device context when GetDIBits is called"
-	procSelectObject.Call(memDC, old)
-
+	// CreateDIBSection: the bitmap's pixels live in memory we own, so after
+	// BitBlt the frame is readable directly. GetDIBits is intentionally not
+	// used — it fails intermittently (return 0, GetLastError() == 0)
+	// depending on process state, which is exactly what CAPTUREBLT triggers.
 	bmi := bitmapInfo{}
 	bmi.Header.Size = uint32(unsafe.Sizeof(bmi.Header))
 	bmi.Header.Width = int32(width)
@@ -142,16 +126,28 @@ func captureScreenshot() string {
 	bmi.Header.BitCount = 32
 	bmi.Header.Compression = biRGB
 
-	pixels := make([]byte, width*height*4)
-	r, _, _ := procGetDIBits.Call(
-		memDC, hBitmap, 0, uintptr(height),
-		uintptr(unsafe.Pointer(&pixels[0])),
-		uintptr(unsafe.Pointer(&bmi)),
-		dibRGBColors,
-	)
-	if r == 0 {
-		return "Error: GetDIBits failed"
+	var ppvBits uintptr
+	hBitmap, _, _ := procCreateDIBSection.Call(
+		memDC, uintptr(unsafe.Pointer(&bmi)), dibRGBColors,
+		uintptr(unsafe.Pointer(&ppvBits)), 0, 0)
+	if hBitmap == 0 || ppvBits == 0 {
+		return "Error: CreateDIBSection failed"
 	}
+	defer procDeleteObject.Call(hBitmap)
+
+	old, _, _ := procSelectObject.Call(memDC, hBitmap)
+	defer procSelectObject.Call(memDC, old)
+
+	// BitBlt from virtual screen origin (may be negative for left-of-primary
+	// monitors). CAPTUREBLT pulls layered windows into the frame.
+	ret, _, _ := procBitBlt.Call(memDC, 0, 0, w, h, hdc, uintptr(srcX), uintptr(srcY), srccopy|captureBlt)
+	if ret == 0 {
+		return "Error: BitBlt failed"
+	}
+
+	// The shared buffer holds 32bpp BGRA, top-down.
+	pixelBytes := width * height * 4
+	pixels := (*[1 << 28]byte)(unsafe.Pointer(ppvBits))[:pixelBytes:pixelBytes]
 
 	// Encode as BMP directly — avoids importing image/png (~1.5MB savings)
 	// BMP with BITMAPINFOHEADER, 24-bit RGB, no compression
@@ -173,12 +169,12 @@ func captureScreenshot() string {
 	binary.LittleEndian.PutUint32(bmp[34:], uint32(imgSize)) // image size
 
 	// Write pixel data (BGRA source -> BGR BMP, bottom-up row order)
-	for y := 0; y < height; y++ {
-		srcRow := y * width * 4             // source is top-down (negative height DIB)
-		dstRow := 54 + (height-1-y)*rowSize // BMP is bottom-up
-		for x := 0; x < width; x++ {
-			sOff := srcRow + x*4
-			dOff := dstRow + x*3
+	for yy := 0; yy < height; yy++ {
+		srcRow := yy * width * 4             // source is top-down (negative height DIB)
+		dstRow := 54 + (height-1-yy)*rowSize // BMP is bottom-up
+		for xx := 0; xx < width; xx++ {
+			sOff := srcRow + xx*4
+			dOff := dstRow + xx*3
 			bmp[dOff] = pixels[sOff]     // B
 			bmp[dOff+1] = pixels[sOff+1] // G
 			bmp[dOff+2] = pixels[sOff+2] // R

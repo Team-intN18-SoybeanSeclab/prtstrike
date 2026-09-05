@@ -33,6 +33,22 @@
                 <option value="true">Enabled (Verbose)</option>
             </select>
         </div>
+        <div class="form-group">
+            <label>GeoIP Enrichment</label>
+            <select class="form-input" id="setting-geoip">
+                <option value="false">Disabled (Recommended)</option>
+                <option value="true">Enabled (calls ip-api.com)</option>
+            </select>
+            <div style="font-size:9px; color:#555; margin-top:3px; font-family:'JetBrains Mono';">contacts a third-party service with beacon IPs - opsec risk</div>
+        </div>
+        <div class="form-group">
+            <label>Legacy Beacon Auth (Pre-HMAC payloads)</label>
+            <select class="form-input" id="setting-legacy-auth">
+                <option value="true">Enabled (old payloads can connect)</option>
+                <option value="false">Disabled (HMAC required)</option>
+            </select>
+            <div style="font-size:9px; color:#a55; margin-top:3px; font-family:'JetBrains Mono';">unsigned = unauthenticated beacon protocol; disable after re-issuing all payloads</div>
+        </div>
     </div>
 </div>
 
@@ -121,6 +137,8 @@
                 document.getElementById('setting-timeout').value = s.session_timeout || 24;
                 document.getElementById('setting-theme').value = s.theme || 'PRTSTRIKE_DARK';
                 document.getElementById('setting-debug').value = s.debug ? 'true' : 'false';
+                document.getElementById('setting-geoip').value = s.geoip_lookup ? 'true' : 'false';
+                document.getElementById('setting-legacy-auth').value = s.legacy_beacon_auth === false ? 'false' : 'true';
             }
         } catch(e) {}
     }
@@ -131,7 +149,9 @@
             server_name: document.getElementById('setting-server-name').value,
             session_timeout: parseInt(document.getElementById('setting-timeout').value),
             theme: document.getElementById('setting-theme').value,
-            debug: document.getElementById('setting-debug').value === 'true'
+            debug: document.getElementById('setting-debug').value === 'true',
+            geoip_lookup: document.getElementById('setting-geoip').value === 'true',
+            legacy_beacon_auth: document.getElementById('setting-legacy-auth').value === 'true'
         };
         try {
             const apiResp = await PRTS.api.post('/api/settings', body);

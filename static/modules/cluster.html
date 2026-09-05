@@ -1,0 +1,168 @@
+<div class="section-header module-toolbar">
+    <h3>Cluster Nodes</h3>
+    <div style="display:flex; gap:10px;">
+        <button class="btn-primary" onclick="document.getElementById('join-cluster-modal').style.display='flex'">
+            <i class="fas fa-link"></i> JOIN_CLUSTER
+        </button>
+        <button class="btn-primary" onclick="generateInvite()">
+            <i class="fas fa-ticket-alt"></i> GENERATE_INVITE
+        </button>
+    </div>
+</div>
+
+<div id="invite-result" style="display:none; margin-bottom:15px; padding:10px 14px; border-left:2px solid var(--accent); background:rgba(0,255,170,0.04); font-family:'JetBrains Mono'; font-size:11px; color:var(--accent); word-break:break-all;"></div>
+
+<div class="module-info-bar" style="margin-bottom:12px; font-family:'JetBrains Mono'; font-size:10px; color:#666;">
+    SELF NODE: <span id="cluster-self-id" style="color:var(--accent);">........</span>
+    &nbsp;|&nbsp; BEACONS ALWAYS CALL BACK TO THE NODE OWNING THEIR LISTENER.
+    &nbsp;|&nbsp; TASKS ON REMOTE BEACONS ARE FORWARDED AUTOMATICALLY.
+</div>
+
+<div class="list-container module-list-scroll">
+    <div class="beacons-header-bar" style="grid-template-columns: 0.8fr 1fr 1.4fr 0.8fr 0.8fr 120px; min-width:600px;">
+        <span>NODE ID</span>
+        <span>NAME</span>
+        <span>URL</span>
+        <span>STATUS</span>
+        <span>LAST SEEN</span>
+        <span style="text-align:right;">ACTIONS</span>
+    </div>
+    <div id="cluster-nodes-list" style="max-height:300px; overflow-y:auto;">
+        <div style="padding:30px; text-align:center; opacity:0.3; font-family:'JetBrains Mono';">LOADING_NODES...</div>
+    </div>
+</div>
+
+<!-- Join Cluster Modal -->
+<div id="join-cluster-modal" class="modal-shell">
+    <div class="modal-panel modal-panel-sm">
+        <div class="modal-header-row">
+            <h3 class="modal-title-mono">&gt;&gt; JOIN_CLUSTER</h3>
+            <span class="modal-close" onclick="document.getElementById('join-cluster-modal').style.display='none'">&times;</span>
+        </div>
+        <form onsubmit="event.preventDefault(); joinCluster();">
+            <div class="form-group" style="margin-bottom:15px;">
+                <label class="form-label-mono">PEER_URL:</label>
+                <input type="text" id="join-cluster-url" class="form-input" placeholder="http://10.0.0.5:8083" required style="width:100%;">
+            </div>
+            <div class="form-group" style="margin-bottom:15px;">
+                <label class="form-label-mono">INVITE_TOKEN:</label>
+                <input type="text" id="join-cluster-token" class="form-input" placeholder="one-time token from the peer" required style="width:100%;">
+            </div>
+            <button type="submit" class="btn-primary" style="width:100%;">JOIN</button>
+        </form>
+    </div>
+</div>
+
+<script>
+(function() {
+    function formatSeen(iso) {
+        if (!iso || iso.startsWith('0001-01-01')) return '-';
+        const diff = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
+        if (diff < 60) return diff + 's ago';
+        if (diff < 3600) return Math.floor(diff / 60) + 'm ago';
+        return Math.floor(diff / 3600) + 'h ago';
+    }
+
+    window.generateInvite = async function() {
+        try {
+            const apiResp = await PRTS.api.post('/api/cluster/invite', {});
+            const result = apiResp.result;
+            const box = document.getElementById('invite-result');
+            if (result.status === 'success' && result.data) {
+                const invite = result.data.invite_token;
+                const origin = window.location.origin;
+                box.style.display = 'block';
+                box.innerHTML = 'INVITE (valid 15 min, one-time): <br>' +
+                    '<span style="color:#fff;">' + escapeHtml(invite) + '</span><br>' +
+                    'PEER URL: <span style="color:#fff;">' + escapeHtml(origin) + '</span><br>' +
+                    '<span style="color:#666;">Share both with the joining node operator.</span>';
+            } else {
+                box.style.display = 'block';
+                box.innerHTML = '<span style="color:#f44336;">ERROR: ' + escapeHtml(result.message || 'invite failed') + '</span>';
+            }
+        } catch(e) {
+            showNotification('ERROR: ' + e.message);
+        }
+    };
+
+    window.joinCluster = async function() {
+        const url = document.getElementById('join-cluster-url').value.trim();
+        const token = document.getElementById('join-cluster-token').value.trim();
+        if (!url || !token) return;
+        try {
+            const apiResp = await PRTS.api.post('/api/cluster/join', { url: url, invite_token: token });
+            const result = apiResp.result;
+            if (result.status === 'success') {
+                showNotification('CLUSTER: joined ' + url);
+                document.getElementById('join-cluster-modal').style.display = 'none';
+                fetchClusterStatus();
+                loadNodes();
+            } else {
+                showNotification('JOIN FAILED: ' + result.message);
+            }
+        } catch(e) {
+            showNotification('JOIN FAILED: ' + e.message);
+        }
+    };
+
+    window.removeNode = async function(nodeId) {
+        if (!confirm('Remove this node from the cluster?')) return;
+        try {
+            const apiResp = await PRTS.api.delete('/api/cluster/nodes/' + encodeURIComponent(nodeId));
+            const result = apiResp.result;
+            showNotification(result.status === 'success' ? 'NODE_REMOVED' : ('ERROR: ' + result.message));
+            loadNodes();
+        } catch(e) {
+            showNotification('ERROR: ' + e.message);
+        }
+    };
+
+    async function loadNodes() {
+        try {
+            const apiResp = await PRTS.api.get('/api/cluster/status');
+            const result = apiResp.result;
+            const container = document.getElementById('cluster-nodes-list');
+            if (!container) return;
+            if (result.status !== 'success' || !result.data) {
+                container.innerHTML = '<div style="padding:30px; text-align:center; opacity:0.3; font-family:\'JetBrains Mono\';">CLUSTER_UNAVAILABLE</div>';
+                return;
+            }
+            const peers = result.data.peers || [];
+            const queued = result.data.pending_events || 0;
+            if (typeof state !== 'undefined') {
+                state.clusterSelf = (result.data.self && result.data.self.id) || state.clusterSelf;
+            }
+            const selfEl = document.getElementById('cluster-self-id');
+            if (selfEl && result.data.self) selfEl.innerText = (result.data.self.id || '').substring(0, 8);
+
+            if (peers.length === 0) {
+                container.innerHTML = '<div style="padding:30px; text-align:center; opacity:0.3; font-family:\'JetBrains Mono\';">STANDALONE_NODE - GENERATE_AN_INVITE_OR_JOIN_A_PEER</div>';
+                return;
+            }
+            container.innerHTML = peers.map(n => {
+                const online = n.status === 'online';
+                return `
+                <div class="beacon-row" style="grid-template-columns: 0.8fr 1fr 1.4fr 0.8fr 0.8fr 120px; padding:10px 20px; ${online ? '' : 'opacity:0.6;'}">
+                    <span style="font-family:'JetBrains Mono'; font-size:11px; color:var(--accent);">${escapeHtml((n.id || '').substring(0,8))}</span>
+                    <span style="font-family:'JetBrains Mono'; font-size:12px;">${escapeHtml(n.name || '-')}</span>
+                    <span style="font-family:'JetBrains Mono'; font-size:11px; color:#888; word-break:break-all;">${escapeHtml(n.url || '-')}</span>
+                    <span style="font-size:11px; color:${online ? 'var(--success)' : '#f44336'}; font-family:'JetBrains Mono'; text-transform:uppercase;">
+                        <span class="status-dot ${online ? 'online' : ''}" style="margin-right:6px; ${online ? '' : 'background:#444; box-shadow:none;'}"></span>${escapeHtml(n.status)}
+                    </span>
+                    <span style="font-size:10px; color:#666; font-family:'JetBrains Mono';">${formatSeen(n.last_seen)}</span>
+                    <span style="text-align:right;">
+                        <span style="color:#ff3b30; cursor:pointer; font-size:11px;" onclick="removeNode('${escapeHtml(n.id)}')" title="Remove">
+                            <i class="fas fa-trash"></i>
+                        </span>
+                    </span>
+                </div>`;
+            }).join('') + (queued > 0 ? `<div style="padding:8px 20px; font-family:'JetBrains Mono'; font-size:10px; color:#666;">${queued} EVENT(S) QUEUED FOR DELIVERY</div>` : '');
+        } catch(e) {
+            console.error('cluster status error:', e);
+        }
+    }
+
+    loadNodes();
+    setInterval(loadNodes, 15000);
+})();
+</script>

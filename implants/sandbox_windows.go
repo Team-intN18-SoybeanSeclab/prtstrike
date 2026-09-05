@@ -182,8 +182,16 @@ func checkHardwareLimits() bool {
 }
 
 func checkUptime() bool {
-	ret, _, _ := procGetTickCount64.Call()
-	uptimeMs := uint64(ret)
+	// GetTickCount64 returns the 64-bit tick count in edx:eax on 386 and in
+	// rax on amd64; syscall.Call exposes those as r1/r2. Taking r1 alone
+	// truncated the value on 32-bit builds.
+	r1, r2, _ := procGetTickCount64.Call()
+	var uptimeMs uint64
+	if runtime.GOARCH == "386" {
+		uptimeMs = uint64(r2)<<32 | uint64(r1)
+	} else {
+		uptimeMs = uint64(r1)
+	}
 	// Uptime < 30 minutes
 	if uptimeMs < 30*60*1000 {
 		return true

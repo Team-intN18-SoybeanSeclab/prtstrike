@@ -48,19 +48,67 @@
         );
     }
 
-    function loadVisNetwork() {
+    function setLoadingText(text) {
+        const el = document.getElementById('topo-loading');
+        if (el) {
+            el.style.display = 'block';
+            el.innerHTML = '<span style="color:#ff9d00;">[!]</span> ' + text;
+        }
+    }
+
+    function loadScript(src) {
+        return new Promise(function(resolve, reject) {
+            const s = document.createElement('script');
+            s.src = src;
+            s.onload = resolve;
+            s.onerror = function() { reject(new Error('load failed: ' + src)); };
+            document.head.appendChild(s);
+        });
+    }
+
+    async function loadVisGlobal(src) {
+        const saved = {
+            define: window.define,
+            exports: window.exports,
+            module: window.module,
+        };
+        window.define = undefined;
+        window.exports = undefined;
+        window.module = undefined;
+        try {
+            await loadScript(src);
+        } finally {
+            for (const key of ["define", "exports", "module"]) {
+                if (saved[key] !== undefined) {
+                    window[key] = saved[key];
+                } else {
+                    try { delete window[key]; } catch (e) { window[key] = undefined; }
+                }
+            }
+        }
+        return typeof vis !== 'undefined' && !!vis.Network;
+    }
+
+    async function loadVisNetwork() {
         if (typeof vis !== 'undefined' && vis.Network) {
             initTopology();
             return;
         }
-        const s = document.createElement('script');
-        s.src = 'https://unpkg.com/vis-network@9.1.9/standalone/umd/vis-network.min.js';
-        s.onload = initTopology;
-        s.onerror = function() {
-            const el = document.getElementById('topo-loading');
-            if (el) el.textContent = 'FAILED_TO_LOAD_VIS_NETWORK_CDN';
-        };
-        document.head.appendChild(s);
+        setLoadingText('LOADING_TOPOLOGY_ENGINE...');
+        const sources = [
+            '/static/js/vis-network.min.js',
+            'https://cdn.jsdelivr.net/npm/vis-network@9.1.9/standalone/umd/vis-network.min.js',
+            'https://unpkg.com/vis-network@9.1.9/standalone/umd/vis-network.min.js',
+        ];
+        for (const src of sources) {
+            try {
+                if (await loadVisGlobal(src)) {
+                    initTopology();
+                    return;
+                }
+            } catch(e) { /* try next source */ }
+        }
+        setLoadingText('TOPOLOGY_LIBRARY_UNAVAILABLE (static/js/vis-network.min.js missing and CDNs unreachable)');
     }
 
     function initTopology() {

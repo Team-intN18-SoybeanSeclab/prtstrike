@@ -1718,6 +1718,10 @@
                         <i class="fas fa-tasks"></i>
                         <span class="nav-label">TASKS</span>
                     </a>
+                    <a href="#" class="nav-item" data-page="cluster">
+                        <i class="fas fa-network-wired"></i>
+                        <span class="nav-label">CLUSTER</span>
+                    </a>
                     <a href="#" class="nav-item" data-page="settings">
                         <i class="fas fa-cog"></i>
                         <span class="nav-label">SETTINGS</span>
@@ -1790,7 +1794,8 @@
             clientsRefreshTimer: null,
             ws: null,
             maxLogs: 100,
-            username: 'Operator'
+            username: 'Operator',
+            clusterSelf: ''   // local cluster node ID (for replica badges)
         };
 
         // --- WebSocket ---
@@ -1971,12 +1976,16 @@
                 const safeClientID = escapeHtml(escapeJsString(client.id || ''));
                 const safeIP = escapeHtml(escapeJsString(client.ip || ''));
                 const safeStatus = escapeHtml(String(client.status || 'offline').replace(/[^a-z0-9_-]/gi, ''));
+                const isRemoteBeacon = client.home_node_id && state.clusterSelf && client.home_node_id !== state.clusterSelf;
+                const remoteBadge = isRemoteBeacon
+                    ? `<span style="color:#4caf50;font-size:9px;margin-left:5px;" title="Home node ${escapeHtml((client.home_node_id || '').substring(0,8))}">&#127760; REMOTE</span>`
+                    : '';
                 row.innerHTML = `
                     <div style="display:flex;align-items:center;justify-content:center;">
                         <i class="fab fa-${osIcon}" style="color:${osColor}; font-size:16px;"></i>
                     </div>
                     <div style="display:flex;flex-direction:column;gap:2px;">
-                        <span style="font-weight:bold;color:#fff;">${hostDisplay}</span>
+                        <span style="font-weight:bold;color:#fff;">${hostDisplay}${remoteBadge}</span>
                         <span style="font-size:9px;color:#666;">${escapeHtml(String(client.id || '').substring(0,16))}</span>
                     </div>
                     <div class="ip-cell" style="display:flex;flex-direction:column;gap:2px;">
@@ -2244,6 +2253,7 @@
                 loadModule('welcome');
                 fetchClients();
                 startClientRefresh();
+                fetchClusterStatus();
             }
         });
 
@@ -2261,7 +2271,7 @@
             modal.style.display = 'flex';
             // Clear previous output
             const output = document.getElementById('interact-output');
-            if (output) output.innerHTML = `<div style="color:var(--success);">[*] Session opened with ${ip}</div><div style="color:#888;">[*] Type commands below. Results will appear here.</div><br>`;
+            if (output) output.innerHTML = `<div style="color:var(--success);">[*] Session opened with ${escapeHtml(ip)}</div><div style="color:#888;">[*] Type commands below. Results will appear here.</div><br>`;
             document.getElementById('interact-cmd').focus();
         }
 
@@ -2275,8 +2285,8 @@
                     this.value = '';
 
                     const output = document.getElementById('interact-output');
-                    // Echo command
-                    output.innerHTML += `<div style="color:#fff;">prtshell > ${cmd}</div>`;
+                    // Echo command (escaped: command echo must never execute HTML)
+                    output.innerHTML += `<div style="color:#fff;">prtshell > ${escapeHtml(cmd)}</div>`;
                     output.scrollTop = output.scrollHeight;
 
                     // Send via REST API
@@ -2284,16 +2294,16 @@
                         const apiResp = await PRTS.api.post('/api/tasks', { client_id: currentBeaconId, command: cmd });
                         const result = apiResp.result;
                         if (result.status === 'success' && result.data && result.data.id) {
-                            output.innerHTML += `<div style="color:#888;">[*] Task queued: ${result.data.id} - polling for result...</div>`;
+                            output.innerHTML += `<div style="color:#888;">[*] Task queued: ${escapeHtml(result.data.id)} - polling for result...</div>`;
                             output.scrollTop = output.scrollHeight;
                             // Poll for result
                             pollTaskResult(result.data.id, output);
                         } else {
-                            output.innerHTML += `<div style="color:var(--success);">${result.message || 'OK'}</div>`;
+                            output.innerHTML += `<div style="color:var(--success);">${escapeHtml(result.message || 'OK')}</div>`;
                             output.scrollTop = output.scrollHeight;
                         }
                     } catch(err) {
-                        output.innerHTML += `<div style="color:#f44336;">[!] Error: ${err.message}</div>`;
+                        output.innerHTML += `<div style="color:#f44336;">[!] Error: ${escapeHtml(err.message)}</div>`;
                         output.scrollTop = output.scrollHeight;
                     }
                 }
@@ -2324,12 +2334,12 @@
                                 <img src="data:${mime};base64,${b64}" style="max-width:100%;border:1px solid var(--border);cursor:pointer;" onclick="window.open(this.src,'_blank')" title="Click to open full size">
                             </div><br>`;
                         } else {
-                            outputEl.innerHTML += `<div style="color:#eee; white-space:pre-wrap; font-family:'JetBrains Mono';">${task.result || '(no output)'}</div><br>`;
+                            outputEl.innerHTML += `<div style="color:#eee; white-space:pre-wrap; font-family:'JetBrains Mono';">${escapeHtml(task.result || '(no output)')}</div><br>`;
                         }
                         outputEl.scrollTop = outputEl.scrollHeight;
                         return;
                     } else if (task && task.status === 'failed') {
-                        outputEl.innerHTML += `<div style="color:#f44336;">[!] Task failed: ${task.result || 'unknown error'}</div><br>`;
+                        outputEl.innerHTML += `<div style="color:#f44336;">[!] Task failed: ${escapeHtml(task.result || 'unknown error')}</div><br>`;
                         outputEl.scrollTop = outputEl.scrollHeight;
                         return;
                     }
@@ -2475,9 +2485,22 @@
             const host = data.hostname || data.ip || 'unknown';
             const user = data.username || '';
             const admin = data.is_admin ? ' [ADMIN]' : '';
-            showNotification(`NEW BEACON: ${user}@${host}${admin} (${data.os || ''})`);
+            showNotification(`NEW BEACON: ${escapeHtml(user)}@${escapeHtml(host)}${admin} (${escapeHtml(data.os || '')})`);
             appendLog('C2', `NEW_BEACON: ${user}@${host} from ${data.ip}${admin}`, 'success');
             fetchClients();
+        }
+
+        async function fetchClusterStatus() {
+            try {
+                const response = await PRTS.api.get('/api/cluster/status');
+                if (response.status !== 200) return;
+                const result = await response.json();
+                if (result.status === 'success' && result.data && result.data.self) {
+                    state.clusterSelf = result.data.self.id || '';
+                    const nodeEls = document.querySelectorAll('#cluster-self-id');
+                    nodeEls.forEach(el => el.innerText = (result.data.self.id || '').substring(0, 8));
+                }
+            } catch (e) { /* standalone node or not ready */ }
         }
 
         // Toggle console
@@ -2493,7 +2516,7 @@
             const bottomOffset = bc ? bc.offsetHeight + 10 : 30;
             const toast = document.createElement('div');
             toast.style.cssText = `position:fixed; bottom:${bottomOffset}px; right:20px; background:rgba(0,0,0,0.9); border-left:4px solid var(--accent); color:var(--accent); padding:12px 20px; z-index:3001; font-family:"JetBrains Mono",monospace; font-size:11px; backdrop-filter:blur(10px); border:1px solid rgba(125,142,142,0.3); max-width:400px; animation:toastIn 0.3s ease-out;`;
-            toast.innerHTML = `<span style="color:var(--success); margin-right:8px;">></span> ${msg}`;
+            toast.innerHTML = `<span style="color:var(--success); margin-right:8px;">></span> ${escapeHtml(msg)}`;
             document.body.appendChild(toast);
             setTimeout(() => {
                 toast.style.opacity = '0';
@@ -2577,6 +2600,7 @@
 <span style="color:var(--text-dim);">  ├─</span> <span style="color:var(--success);">sleep</span> <span style="color:var(--text-dim);">&lt;s&gt; [j%]</span>       <span style="color:var(--text-dim);">Set callback interval & jitter</span>
 <span style="color:var(--text-dim);">  ├─</span> <span style="color:var(--success);">note</span> <span style="color:var(--text-dim);">&lt;text&gt;</span>           <span style="color:var(--text-dim);">Set beacon note</span>
 <span style="color:var(--text-dim);">  ├─</span> <span style="color:var(--success);">kill</span>                  <span style="color:var(--text-dim);">Terminate beacon process</span>
+<span style="color:var(--text-dim);">  ├─</span> <span style="color:var(--danger);">uninstall</span>             <span style="color:var(--text-dim);">Remove persistence + payload, then exit</span>
 <span style="color:var(--text-dim);">  ├─</span> <span style="color:var(--success);">clear</span>                 <span style="color:var(--text-dim);">Clear console output</span>
 <span style="color:var(--text-dim);">  └─</span> <span style="color:var(--success);">help</span>                  <span style="color:var(--text-dim);">Show this help</span>
 
@@ -2634,6 +2658,9 @@
             }
             if (cmd === 'kill') {
                 return { type: 'kill' };
+            }
+            if (cmd === 'uninstall') {
+                return { type: 'uninstall' };
             }
             if (directCmds[cmd]) {
                 return { type: 'task', command: directCmds[cmd] };
@@ -2763,6 +2790,16 @@
                         PRTS.api.post('/api/clients/' + currentBeaconId + '/kill').then(function(apiResp) {
                             const res = apiResp.result;
                             appendLog('C2', 'Kill signal sent: ' + res.message, 'warning');
+                            fetchClients();
+                        });
+                        return;
+                    }
+
+                    if (resolved.type === 'uninstall') {
+                        if (!confirm(`UNINSTALL payload on ${currentBeaconId}?\n\nThis removes persistence artifacts, deletes the payload binary and terminates the beacon.`)) return;
+                        PRTS.api.post('/api/clients/' + currentBeaconId + '/uninstall').then(function(apiResp) {
+                            const res = apiResp.result;
+                            appendLog('C2', 'Uninstall ordered: ' + res.message, 'warning');
                             fetchClients();
                         });
                         return;

