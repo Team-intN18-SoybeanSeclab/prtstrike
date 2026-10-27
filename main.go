@@ -1,14 +1,19 @@
 package main
 
 import (
+	"context"
 	cryptoRand "crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/gin-contrib/sessions"
 	"github.com/gin-contrib/sessions/cookie"
@@ -28,6 +33,10 @@ func main() {
 		r.Use(gin.Logger())
 	}
 	r.Use(gin.Recovery())
+
+	// Compress text responses for browser clients. Binary payloads, range
+	// requests and the websocket are skipped inside the middleware.
+	r.Use(gzipMiddleware())
 
 	// Session secret: prefer env var, otherwise generate random key each startup
 	secretKey := os.Getenv("PRTS_SECRET")
@@ -209,8 +218,60 @@ func main() {
 	clusterInit()
 
 	addr := envOrDefault("PRTS_ADDR", ":8083")
+	server := newOperatorServer(addr, r)
+	serveErr := make(chan error, 1)
+	go func() {
+		serveErr <- server.ListenAndServe()
+	}()
+
 	fmt.Printf("[+] PRTSTRIKE C2 SERVER (GIN) STARTED ON %s\n", addr)
-	log.Fatal(r.Run(addr))
+	signalCtx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopSignals()
+
+	var unexpectedServeErr error
+	select {
+	case err := <-serveErr:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			unexpectedServeErr = err
+			log.Printf("[!] Operator server stopped unexpectedly: %v", err)
+		}
+	case <-signalCtx.Done():
+		log.Println("[+] Shutdown signal received")
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	shutdownRuntime(shutdownCtx, server)
+	if unexpectedServeErr != nil {
+		os.Exit(1)
+	}
+}
+
+// newOperatorServer applies conservative connection limits without imposing a
+// write deadline on WebSockets or large authenticated downloads.
+func newOperatorServer(addr string, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       2 * time.Minute,
+		MaxHeaderBytes:    1 << 20,
+	}
+}
+
+func shutdownRuntime(ctx context.Context, server *http.Server) {
+	if err := server.Shutdown(ctx); err != nil {
+		log.Printf("[!] Graceful operator shutdown timed out: %v", err)
+		_ = server.Close()
+	}
+	shutdownActiveListeners()
+	shutdownWebSockets()
+	if sqlDB, err := db.DB(); err == nil {
+		if err := sqlDB.Close(); err != nil {
+			log.Printf("[!] Database close failed: %v", err)
+		}
+	}
+	log.Println("[+] Shutdown complete")
 }
 
 // csrfHeaderGuard rejects state-changing /api requests that lack the custom

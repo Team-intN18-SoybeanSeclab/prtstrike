@@ -1,0 +1,25 @@
+# Compiled binaries and test artifacts
+/prtstrike
+/prtstrike.exe
+*.exe
+prtstrike-test.exe
+
+# Go module/build caches created during local development
+/.gocache/
+/.gopath/
+
+# Embedded SQLite database and its WAL sidecars
+*.db
+*.db-wal
+*.db-shm
+
+# Generated operator credentials (written on first start)
+admin_credentials.txt
+
+# Runtime working directories
+/uploads/
+/files/
+/static/payloads/
+
+# Local smoke-test scratch space
+/.smoke/

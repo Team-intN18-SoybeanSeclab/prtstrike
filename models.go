@@ -212,6 +212,10 @@ type UploadSession struct {
 //  Global Variables
 // ══════════════════════════════════════════════════════════
 
+// logRingSize caps the in-memory operator log buffer replayed over the
+// websocket and the /api/logs endpoint.
+const logRingSize = 200
+
 var (
 	db *gorm.DB
 
@@ -220,7 +224,9 @@ var (
 	wsClients = make(map[*wsClient]bool)
 	wsMutex   sync.Mutex
 
-	logs = make([]string, 0)
+	logRing [logRingSize]string
+	logLen  int // valid entries, never exceeds logRingSize
+	logHead int // index of the oldest entry once the ring is full
 
 	upgrader = websocket.Upgrader{
 		CheckOrigin: func(r *http.Request) bool {
@@ -244,11 +250,76 @@ var (
 	fmRoot = envOrDefault("PRTS_FM_ROOT", "./files")
 )
 
+// sqliteDSN switches the embedded database into WAL mode with a busy timeout
+// and relaxed fsync. The default DELETE journal serialises every beacon check-in
+// behind a lock and surfaces 'database is locked' under bursty traffic; WAL lets
+// readers progress while the single writer commits, and busy_timeout makes
+// contention wait instead of failing.
+func sqliteDSN(path string) string {
+	return fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=synchronous(NORMAL)", path)
+}
+
+// recentLogs returns the buffered entries in chronological order. Callers must
+// hold wsMutex.
+func recentLogs() []string {
+	out := make([]string, 0, logLen)
+	start := logHead
+	if logLen < logRingSize {
+		start = 0
+	}
+	for i := 0; i < logLen; i++ {
+		out = append(out, logRing[(start+i)%logRingSize])
+	}
+	return out
+}
+
+// Sleep/jitter are read on every beacon poll; the write-through cache below
+// removes that lookup from the check-in hot path. Every writer updates it.
+type beaconSleepCfg struct{ sleep, jitter int }
+
+var (
+	sleepCache   = make(map[string]beaconSleepCfg)
+	sleepCacheMu sync.RWMutex
+)
+
+func cacheBeaconSleep(id string, sleep, jitter int) {
+	if id == "" {
+		return
+	}
+	sleepCacheMu.Lock()
+	sleepCache[id] = beaconSleepCfg{sleep: sleep, jitter: jitter}
+	sleepCacheMu.Unlock()
+}
+
+func uncacheBeaconSleep(id string) {
+	sleepCacheMu.Lock()
+	delete(sleepCache, id)
+	sleepCacheMu.Unlock()
+}
+
+// beaconSleepConfig returns the cached delay profile, falling back to the
+// database when the entry is absent (e.g. upgraded from an older install).
+func beaconSleepConfig(id string) (sleep, jitter int) {
+	sleepCacheMu.RLock()
+	if v, ok := sleepCache[id]; ok {
+		sleepCacheMu.RUnlock()
+		return v.sleep, v.jitter
+	}
+	sleepCacheMu.RUnlock()
+	var client Client
+	if err := db.Select("sleep", "jitter").First(&client, "id = ?", id).Error; err == nil {
+		cacheBeaconSleep(id, client.Sleep, client.Jitter)
+		return client.Sleep, client.Jitter
+	}
+	return 60, 10
+}
+
 // wsClient wraps a websocket connection with an outbound buffered channel and
 // a dedicated writer goroutine. shutdown() is idempotent.
 type wsClient struct {
 	conn *websocket.Conn
 	send chan string
+	done chan struct{}
 	once sync.Once
 }
 
@@ -257,7 +328,7 @@ func (c *wsClient) shutdown() {
 		wsMutex.Lock()
 		delete(wsClients, c)
 		wsMutex.Unlock()
-		close(c.send)
+		close(c.done)
 		c.conn.Close()
 	})
 }
@@ -306,7 +377,7 @@ func kvSet(key, value string) {
 
 func initDB() {
 	var err error
-	db, err = gorm.Open(sqlite.Open(envOrDefault("PRTS_DB_PATH", "prts_c2.db")), &gorm.Config{
+	db, err = gorm.Open(sqlite.Open(sqliteDSN(envOrDefault("PRTS_DB_PATH", "prts_c2.db"))), &gorm.Config{
 		// Explicit db.Transaction calls remain transactional. Independent
 		// single-statement writes no longer pay for an extra BEGIN/COMMIT pair.
 		SkipDefaultTransaction: true,

@@ -31,6 +31,7 @@ func applyClusterEvent(eventType string, payload json.RawMessage) {
 			db.Model(&Client{}).Where("id = ?", m.BeaconID).Updates(map[string]interface{}{
 				"sleep": m.Sleep, "jitter": m.Jitter,
 			})
+			cacheBeaconSleep(m.BeaconID, m.Sleep, m.Jitter)
 		}
 	case "beacon_note":
 		var m struct {
@@ -128,6 +129,7 @@ func upsertClientReplica(b Client) {
 		updates["note"] = b.Note
 	}
 	db.Model(&existing).Updates(updates)
+	cacheBeaconSleep(b.ID, b.Sleep, b.Jitter)
 }
 
 // upsertTaskReplica stores a task row created on another node (same ID).
